@@ -1,0 +1,340 @@
+# Sandbox Executor API Documentation
+
+## Overview
+
+The Sandbox Executor is an HTTP server that provides a secure API for executing commands and performing file operations in a sandboxed environment. It's designed to allow controlled access to system resources through a REST API with authentication.
+
+## Authentication
+
+All endpoints (except `/health`) require authentication via a bearer token passed in the `Authorization` header:
+
+```
+Authorization: Bearer <sandbox-secret>
+```
+
+## API Endpoints
+
+### Health Check
+
+**Endpoint:** `GET /health`
+
+**Description:** Returns the health status of the server.
+
+**Authentication:** Not required
+
+**Response:**
+```json
+{
+  "status": "ok"
+}
+```
+
+---
+
+### Run Command
+
+**Endpoint:** `POST /run`
+
+**Description:** Executes a shell command in the sandbox environment.
+
+**Request Body:**
+```json
+{
+  "cmd": "echo 'Hello World'",
+  "cwd": "/path/to/working/directory",
+  "env": {
+    "VAR_NAME": "value",
+    "ANOTHER_VAR": "another_value"
+  }
+}
+```
+
+**Parameters:**
+- `cmd` (string, required): The shell command to execute
+- `cwd` (string, optional): Working directory for the command execution
+- `env` (object, optional): Environment variables to set/override for the command
+
+**Response:**
+```json
+{
+  "stdout": "command output",
+  "stderr": "error output",
+  "error": "Non-zero exit code",
+  "code": 0
+}
+```
+
+**Response Fields:**
+- `stdout` (string): Standard output from the command
+- `stderr` (string): Standard error output from the command
+- `error` (string): Error message if command failed (only present on failure)
+- `code` (int): Exit code of the command
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/run \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cmd": "ls -la",
+    "cwd": "/tmp",
+    "env": {"DEBUG": "true"}
+  }'
+```
+
+---
+
+### Write File
+
+**Endpoint:** `POST /write_file`
+
+**Description:** Creates or overwrites a file with the specified content.
+
+**Request Body:**
+```json
+{
+  "path": "/path/to/file.txt",
+  "content": "file content here"
+}
+```
+
+**Parameters:**
+- `path` (string, required): The file path to write to
+- `content` (string, required): The content to write to the file
+
+**Response:**
+```json
+{
+  "success": true,
+  "error": "error message if failed"
+}
+```
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/write_file \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/tmp/test.txt",
+    "content": "Hello, World!"
+  }'
+```
+
+---
+
+### Read File
+
+**Endpoint:** `POST /read_file`
+
+**Description:** Reads the content of a file.
+
+**Request Body:**
+```json
+{
+  "path": "/path/to/file.txt"
+}
+```
+
+**Parameters:**
+- `path` (string, required): The file path to read from
+
+**Response:**
+```json
+{
+  "content": "file content",
+  "error": "error message if failed"
+}
+```
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/read_file \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/tmp/test.txt"
+  }'
+```
+
+---
+
+### Delete File
+
+**Endpoint:** `POST /delete_file`
+
+**Description:** Deletes a single file.
+
+**Request Body:**
+```json
+{
+  "path": "/path/to/file.txt"
+}
+```
+
+**Parameters:**
+- `path` (string, required): The file path to delete
+
+**Response:**
+```json
+{
+  "success": true,
+  "error": "error message if failed"
+}
+```
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/delete_file \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/tmp/test.txt"
+  }'
+```
+
+---
+
+### Make Directory
+
+**Endpoint:** `POST /make_dir`
+
+**Description:** Creates a directory, including any necessary parent directories.
+
+**Request Body:**
+```json
+{
+  "path": "/path/to/directory"
+}
+```
+
+**Parameters:**
+- `path` (string, required): The directory path to create
+
+**Response:**
+```json
+{
+  "success": true,
+  "error": "error message if failed"
+}
+```
+
+**Notes:**
+- Creates parent directories if they don't exist (equivalent to `mkdir -p`)
+- Directory permissions are set to 0755
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/make_dir \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/tmp/my/nested/directory"
+  }'
+```
+
+---
+
+### Delete Directory
+
+**Endpoint:** `POST /delete_dir`
+
+**Description:** Recursively deletes a directory and all its contents.
+
+**Request Body:**
+```json
+{
+  "path": "/path/to/directory"
+}
+```
+
+**Parameters:**
+- `path` (string, required): The directory path to delete
+
+**Response:**
+```json
+{
+  "success": true,
+  "error": "error message if failed"
+}
+```
+
+**Notes:**
+- Recursively removes all files and subdirectories (equivalent to `rm -rf`)
+- Use with caution as this operation cannot be undone
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/delete_dir \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/tmp/my/directory"
+  }'
+```
+
+---
+
+### List Directory
+
+**Endpoint:** `POST /list_dir`
+
+**Description:** Lists the contents of a directory.
+
+**Request Body:**
+```json
+{
+  "path": "/path/to/directory"
+}
+```
+
+**Parameters:**
+- `path` (string, required): The directory path to list
+
+**Response:**
+```json
+{
+  "entries": ["file1.txt", "file2.txt", "subdir"],
+  "error": "error message if failed"
+}
+```
+
+**Response Fields:**
+- `entries` (array of strings): List of file and directory names in the specified directory
+- `error` (string): Error message if the operation failed
+
+**Notes:**
+- Returns only the names of entries, not full paths
+- Does not distinguish between files and directories in the response
+- Does not recursively list subdirectories
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/list_dir \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/tmp"
+  }'
+```
+
+---
+
+## Error Handling
+
+All endpoints return appropriate HTTP status codes:
+
+- `200 OK`: Request succeeded
+- `400 Bad Request`: Invalid request body or parameters
+- `401 Unauthorized`: Missing or invalid authentication token
+- `500 Internal Server Error`: Server-side error during operation
+
+Error responses include descriptive error messages in the response body.
+
+## Security Considerations
+
+- All file and directory operations are performed with the permissions of the user running the server
+- Command execution uses `sh -c`, allowing shell features but also potential security risks
+- The server should be run in a properly isolated environment (container, VM, etc.)
+- The sandbox secret should be kept confidential and rotated regularly
+- Consider implementing additional path restrictions to prevent access to sensitive directories
