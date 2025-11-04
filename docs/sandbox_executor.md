@@ -12,6 +12,36 @@ The Sandbox Executor is an HTTP server that provides a secure API for executing 
 - **Port Binding:** Expose internal services via TCP proxy
 - **Real-time Logging:** Stream process output in real-time using Server-Sent Events
 
+## Table of Contents
+
+### Command Execution
+- [Health Check](#health-check)
+- [Run Command](#run-command)
+- [Run Command (Streaming)](#run-command-streaming)
+
+### File Operations
+- [Write File](#write-file)
+- [Read File](#read-file)
+- [Delete File](#delete-file)
+- [Make Directory](#make-directory)
+- [Delete Directory](#delete-directory)
+- [List Directory](#list-directory)
+
+### Port Management
+- [Bind Port](#bind-port)
+- [Unbind Port](#unbind-port)
+
+### Background Process Management
+- [Start Process](#start-process)
+- [List Processes](#list-processes)
+- [Kill Process](#kill-process)
+- [Stream Process Logs](#stream-process-logs)
+- [Process Management Workflow](#background-process-management-workflow)
+
+### Reference
+- [Error Handling](#error-handling)
+- [Security Considerations](#security-considerations)
+
 ## Authentication
 
 All endpoints (except `/health`) require authentication via a bearer token passed in the `Authorization` header:
