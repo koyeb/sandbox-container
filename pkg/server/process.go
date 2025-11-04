@@ -2,7 +2,6 @@ package server
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -17,10 +16,10 @@ import (
 type ProcessStatus string
 
 const (
-	ProcessStatusRunning  ProcessStatus = "running"
+	ProcessStatusRunning   ProcessStatus = "running"
 	ProcessStatusCompleted ProcessStatus = "completed"
-	ProcessStatusFailed   ProcessStatus = "failed"
-	ProcessStatusKilled   ProcessStatus = "killed"
+	ProcessStatusFailed    ProcessStatus = "failed"
+	ProcessStatusKilled    ProcessStatus = "killed"
 )
 
 // Process represents a background process
@@ -70,7 +69,7 @@ func (lb *LogBuffer) Append(entry LogEntry) {
 	defer lb.mu.Unlock()
 
 	lb.entries = append(lb.entries, entry)
-	
+
 	// Keep only the last maxEntries
 	if len(lb.entries) > lb.maxEntries {
 		lb.entries = lb.entries[len(lb.entries)-lb.maxEntries:]
@@ -104,7 +103,7 @@ func (pm *ProcessManager) StartProcess(command, cwd string, env map[string]strin
 	id := uuid.New().String()
 
 	cmd := exec.Command("sh", "-c", command)
-	
+
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
@@ -165,7 +164,7 @@ func (pm *ProcessManager) StartProcess(command, cwd string, env map[string]strin
 // captureOutput captures output from a pipe and stores it in the log buffer
 func (pm *ProcessManager) captureOutput(process *Process, pipe io.Reader, stream string) {
 	scanner := bufio.NewScanner(pipe)
-	
+
 	// Increase buffer size for long lines
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
@@ -201,7 +200,7 @@ func (pm *ProcessManager) captureOutput(process *Process, pipe io.Reader, stream
 // waitForCompletion waits for the process to complete and updates its status
 func (pm *ProcessManager) waitForCompletion(process *Process) {
 	err := process.cmd.Wait()
-	
+
 	process.mu.Lock()
 	defer process.mu.Unlock()
 
