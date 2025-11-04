@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 )
 
 type Server struct {
@@ -85,10 +86,15 @@ func (s *Server) StartTCPProxy(port string) error {
 	s.tcpProxy.SetListener(listener)
 
 	return listener.Start(func(conn *Connection) {
+		defer conn.Close()
+
 		targetPort := s.tcpProxy.GetTargetPort()
 		if targetPort == "" {
-			log.Printf("No target port configured, closing connection")
-			conn.Close()
+			// No target port configured - accept connection and wait briefly
+			// This allows health checks to succeed
+			buf := make([]byte, 1)
+			conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			conn.Read(buf)
 			return
 		}
 
@@ -96,7 +102,6 @@ func (s *Server) StartTCPProxy(port string) error {
 		targetConn, err := DialTCP("localhost:" + targetPort)
 		if err != nil {
 			log.Printf("Failed to connect to target port %s: %v", targetPort, err)
-			conn.Close()
 			return
 		}
 		defer targetConn.Close()
