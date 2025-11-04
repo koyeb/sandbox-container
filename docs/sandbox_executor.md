@@ -2,7 +2,15 @@
 
 ## Overview
 
-The Sandbox Executor is an HTTP server that provides a secure API for executing commands and performing file operations in a sandboxed environment. It's designed to allow controlled access to system resources through a REST API with authentication.
+The Sandbox Executor is an HTTP server that provides a secure API for executing commands, managing background processes, and performing file operations in a sandboxed environment. It's designed to allow controlled access to system resources through a REST API with authentication.
+
+### Key Features
+
+- **Command Execution:** Run one-off commands synchronously or with streaming output
+- **Background Process Management:** Start, monitor, and control long-running background processes
+- **File Operations:** Create, read, update, and delete files and directories
+- **Port Binding:** Expose internal services via TCP proxy
+- **Real-time Logging:** Stream process output in real-time using Server-Sent Events
 
 ## Authentication
 
@@ -509,13 +517,426 @@ curl -X POST http://localhost:8080/unbind_port \
 
 ---
 
+### Start Process
+
+**Endpoint:** `POST /start_process`
+
+**Description:** Starts a new background process in the sandbox environment. The process runs asynchronously and can be monitored and controlled via other process management endpoints.
+
+**Request Body:**
+```json
+{
+  "cmd": "python -u app.py",
+  "cwd": "/path/to/working/directory",
+  "env": {
+    "PORT": "8080",
+    "DEBUG": "true"
+  }
+}
+```
+
+**Parameters:**
+- `cmd` (string, required): The shell command to execute in the background
+- `cwd` (string, optional): Working directory for the command execution
+- `env` (object, optional): Environment variables to set/override for the command
+
+**Response (201 Created):**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "pid": 12345,
+  "status": "running"
+}
+```
+
+**Response Fields:**
+- `id` (string): Unique UUID identifier for the process
+- `pid` (integer): Operating system process ID
+- `status` (string): Current process status (always "running" on successful start)
+
+**Error Response (500 Internal Server Error):**
+```json
+{
+  "error": "Failed to start process: <error details>"
+}
+```
+
+**Process Status Values:**
+- `running`: Process is currently executing
+- `completed`: Process exited successfully (exit code 0)
+- `failed`: Process exited with non-zero exit code
+- `killed`: Process was terminated via kill_process API
+
+**Notes:**
+- The process runs in the background and does not block the API response
+- Process output (stdout/stderr) is captured and can be accessed via `/process_logs_streaming`
+- Each process stores up to 10,000 log lines; older logs are discarded
+- Environment variables are added to the existing environment inherited from the server
+- Use unique process IDs to manage and monitor processes
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/start_process \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cmd": "python -u app.py",
+    "cwd": "/home/user/project",
+    "env": {
+      "PORT": "8080",
+      "DEBUG": "true"
+    }
+  }'
+```
+
+---
+
+### List Processes
+
+**Endpoint:** `GET /list_processes`
+
+**Description:** Returns a list of all processes (running, completed, failed, or killed) managed by the sandbox executor.
+
+**Request Body:** None
+
+**Response (200 OK):**
+```json
+{
+  "processes": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "pid": 12345,
+      "status": "running"
+    },
+    {
+      "id": "660e8400-e29b-41d4-a716-446655440001",
+      "pid": 12346,
+      "status": "completed"
+    },
+    {
+      "id": "770e8400-e29b-41d4-a716-446655440002",
+      "pid": 12347,
+      "status": "killed"
+    }
+  ]
+}
+```
+
+**Response Fields:**
+- `processes` (array): List of all processes
+  - `id` (string): Unique UUID identifier for the process
+  - `pid` (integer): Operating system process ID
+  - `status` (string): Current process status
+
+**Notes:**
+- Returns all processes regardless of status
+- Completed processes remain in the list until the server restarts
+- No pagination is implemented; all processes are returned
+- Processes are stored in memory only and lost on server restart
+
+**Example:**
+```bash
+curl -X GET http://localhost:8080/list_processes \
+  -H "Authorization: Bearer your-secret"
+```
+
+---
+
+### Kill Process
+
+**Endpoint:** `POST /kill_process`
+
+**Description:** Terminates a running process by its unique identifier.
+
+**Request Body:**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+**Parameters:**
+- `id` (string, required): The unique process ID returned by `/start_process`
+
+**Response (200 OK):**
+```json
+{
+  "success": true,
+  "message": "Process killed successfully"
+}
+```
+
+**Response Fields:**
+- `success` (boolean): Whether the operation succeeded
+- `message` (string): Confirmation message
+
+**Error Response (400 Bad Request):**
+```json
+{
+  "success": false,
+  "error": "process not found: <process-id>"
+}
+```
+or
+```json
+{
+  "success": false,
+  "error": "process is not running (status: completed)"
+}
+```
+
+**Notes:**
+- Sends SIGKILL to the process for immediate termination
+- Cannot kill a process that has already completed, failed, or been killed
+- The process status will be updated to "killed" after successful termination
+- Child processes may become orphaned if not properly managed by the parent
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/kill_process \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "550e8400-e29b-41d4-a716-446655440000"
+  }'
+```
+
+---
+
+### Stream Process Logs
+
+**Endpoint:** `POST /process_logs_streaming`
+
+**Description:** Streams the logs (stdout and stderr) of a process in real-time using Server-Sent Events (SSE). Historical logs are sent first, followed by new logs as they arrive.
+
+**Request Body:**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+**Parameters:**
+- `id` (string, required): The unique process ID returned by `/start_process`
+
+**Response (200 OK):** Server-Sent Events stream with log entries
+
+**Event Format:**
+
+1. **log** events (sent for each log line):
+```json
+{
+  "timestamp": "2025-11-04T12:34:56Z",
+  "stream": "stdout",
+  "data": "Application started on port 8080"
+}
+```
+or
+```json
+{
+  "timestamp": "2025-11-04T12:34:57Z",
+  "stream": "stderr",
+  "data": "Warning: debug mode enabled"
+}
+```
+
+2. **complete** event (sent when stream ends):
+```json
+{
+  "message": "stream ended"
+}
+```
+
+3. **error** event (sent if process not found):
+```json
+{
+  "error": "process not found: <process-id>"
+}
+```
+
+**Log Entry Fields:**
+- `timestamp` (string): ISO 8601 timestamp when the log was captured
+- `stream` (string): Either "stdout" or "stderr"
+- `data` (string): The log line content
+
+**Response Format:**
+- Uses Server-Sent Events (SSE) protocol
+- Content-Type: `text/event-stream`
+- Each event follows SSE format: `event: <type>\ndata: <json>\n\n`
+- Connection stays open until the process completes or client disconnects
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/process_logs_streaming \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -N \
+  -d '{
+    "id": "550e8400-e29b-41d4-a716-446655440000"
+  }'
+```
+
+**Example Response Stream:**
+```
+event: log
+data: {"timestamp":"2025-11-04T12:34:56Z","stream":"stdout","data":"Starting application..."}
+
+event: log
+data: {"timestamp":"2025-11-04T12:34:57Z","stream":"stdout","data":"Server listening on port 8080"}
+
+event: log
+data: {"timestamp":"2025-11-04T12:34:58Z","stream":"stderr","data":"Warning: debug mode"}
+
+event: complete
+data: {"message":"stream ended"}
+
+```
+
+**Notes:**
+- First sends all historical logs (up to 10,000 most recent lines), then streams new logs in real-time
+- Both stdout and stderr are included in the stream
+- Logs are timestamped at capture time, not when streamed
+- The stream automatically closes when the process completes
+- Multiple clients can stream logs from the same process simultaneously
+- If the process has already completed, you'll receive all captured logs followed by the complete event
+
+**JavaScript Example:**
+```javascript
+const response = await fetch('http://localhost:8080/process_logs_streaming', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer your-secret',
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    id: '550e8400-e29b-41d4-a716-446655440000'
+  })
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  
+  const text = decoder.decode(value);
+  const lines = text.split('\n');
+  
+  for (const line of lines) {
+    if (line.startsWith('data: ')) {
+      const data = JSON.parse(line.substring(6));
+      if (data.stream) {
+        console.log(`[${data.stream}] ${data.data}`);
+      }
+    }
+  }
+}
+```
+
+**Python Example:**
+```python
+import requests
+import json
+
+response = requests.post(
+    'http://localhost:8080/process_logs_streaming',
+    headers={
+        'Authorization': 'Bearer your-secret',
+        'Content-Type': 'application/json'
+    },
+    json={'id': '550e8400-e29b-41d4-a716-446655440000'},
+    stream=True
+)
+
+for line in response.iter_lines():
+    if line:
+        line = line.decode('utf-8')
+        if line.startswith('data: '):
+            data = json.loads(line[6:])
+            if 'stream' in data:
+                print(f"[{data['stream']}] {data['data']}")
+```
+
+---
+
+## Background Process Management Workflow
+
+### Starting and Monitoring a Long-Running Process
+
+1. **Start the process:**
+```bash
+PROCESS_ID=$(curl -X POST http://localhost:8080/start_process \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "python -u server.py"}' \
+  | jq -r '.id')
+
+echo "Started process: $PROCESS_ID"
+```
+
+2. **Stream the logs in real-time:**
+```bash
+curl -X POST http://localhost:8080/process_logs_streaming \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -N \
+  -d "{\"id\": \"$PROCESS_ID\"}"
+```
+
+3. **Check process status (in another terminal):**
+```bash
+curl -X GET http://localhost:8080/list_processes \
+  -H "Authorization: Bearer your-secret" \
+  | jq ".processes[] | select(.id == \"$PROCESS_ID\")"
+```
+
+4. **Kill the process when done:**
+```bash
+curl -X POST http://localhost:8080/kill_process \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -d "{\"id\": \"$PROCESS_ID\"}"
+```
+
+### Running Multiple Concurrent Processes
+
+```bash
+# Start multiple background processes
+WORKER_1=$(curl -s -X POST http://localhost:8080/start_process \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "python worker.py --task=1"}' | jq -r '.id')
+
+WORKER_2=$(curl -s -X POST http://localhost:8080/start_process \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "python worker.py --task=2"}' | jq -r '.id')
+
+# Monitor all processes
+curl -X GET http://localhost:8080/list_processes \
+  -H "Authorization: Bearer your-secret" | jq
+
+# Stream logs from specific worker
+curl -X POST http://localhost:8080/process_logs_streaming \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -N \
+  -d "{\"id\": \"$WORKER_1\"}"
+```
+
+---
+
 ## Error Handling
 
 All endpoints return appropriate HTTP status codes:
 
 - `200 OK`: Request succeeded
+- `201 Created`: Resource created successfully (e.g., process started)
 - `400 Bad Request`: Invalid request body or parameters
 - `401 Unauthorized`: Missing or invalid authentication token
+- `405 Method Not Allowed`: Wrong HTTP method used
+- `409 Conflict`: Resource conflict (e.g., port already bound)
 - `500 Internal Server Error`: Server-side error during operation
 
 Error responses include descriptive error messages in the response body.
@@ -527,3 +948,22 @@ Error responses include descriptive error messages in the response body.
 - The server should be run in a properly isolated environment (container, VM, etc.)
 - The sandbox secret should be kept confidential and rotated regularly
 - Consider implementing additional path restrictions to prevent access to sensitive directories
+
+### Background Process Security
+
+- **Process Isolation:** Background processes run with the same permissions as the sandbox executor
+- **Resource Limits:** No automatic resource limits (CPU, memory) are enforced on background processes
+- **Process Cleanup:** Completed processes remain in memory until server restart; consider monitoring memory usage
+- **Log Storage:** Each process stores up to 10,000 log lines in memory; very verbose processes may lose older logs
+- **Process Persistence:** All process information is stored in memory only and lost on server restart
+- **Orphaned Processes:** If the sandbox executor crashes, background processes may continue running as orphans
+- **Concurrent Access:** The process management system is thread-safe and supports concurrent API calls
+
+### Best Practices for Process Management
+
+1. **Monitor Running Processes:** Regularly check `/list_processes` to avoid accumulating too many processes
+2. **Clean Up:** Kill processes that are no longer needed to free system resources
+3. **Log Management:** For very verbose processes, be aware of the 10,000 line log buffer limit
+4. **Error Handling:** Always check process status after starting to ensure successful launch
+5. **Timeouts:** Implement client-side timeouts when streaming logs to prevent hung connections
+6. **Resource Monitoring:** Monitor system resources (CPU, memory) as no automatic limits are enforced

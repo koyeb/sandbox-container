@@ -114,6 +114,184 @@ func (s *Server) runHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// Process management handlers
+
+type StartProcessRequest struct {
+	Cmd string            `json:"cmd"`
+	Cwd string            `json:"cwd,omitempty"`
+	Env map[string]string `json:"env,omitempty"`
+}
+
+type StartProcessResponse struct {
+	ID     string `json:"id"`
+	PID    int    `json:"pid"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+func (s *Server) startProcessHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req StartProcessRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if req.Cmd == "" {
+		http.Error(w, "Command is required", http.StatusBadRequest)
+		return
+	}
+
+	process, err := s.processManager.StartProcess(req.Cmd, req.Cwd, req.Env)
+	if err != nil {
+		resp := StartProcessResponse{
+			Error: err.Error(),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	resp := StartProcessResponse{
+		ID:     process.ID,
+		PID:    process.PID,
+		Status: string(process.Status),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(resp)
+}
+
+type ListProcessesResponse struct {
+	Processes []map[string]interface{} `json:"processes"`
+}
+
+func (s *Server) listProcessesHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	processes := s.processManager.ListProcesses()
+	
+	processesData := make([]map[string]interface{}, len(processes))
+	for i, p := range processes {
+		processesData[i] = p.ToSummaryJSON()
+	}
+
+	resp := ListProcessesResponse{
+		Processes: processesData,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+type KillProcessRequest struct {
+	ID string `json:"id"`
+}
+
+type KillProcessResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+func (s *Server) killProcessHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req KillProcessRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if req.ID == "" {
+		http.Error(w, "Process ID is required", http.StatusBadRequest)
+		return
+	}
+
+	err := s.processManager.KillProcess(req.ID)
+	if err != nil {
+		resp := KillProcessResponse{
+			Success: false,
+			Error:   err.Error(),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	resp := KillProcessResponse{
+		Success: true,
+		Message: "Process killed successfully",
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+type ProcessLogsStreamingRequest struct {
+	ID string `json:"id"`
+}
+
+func (s *Server) processLogsStreamingHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req ProcessLogsStreamingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if req.ID == "" {
+		http.Error(w, "Process ID is required", http.StatusBadRequest)
+		return
+	}
+
+	// Set headers for SSE
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	logChan, err := s.processManager.StreamProcessLogs(req.ID)
+	if err != nil {
+		fmt.Fprintf(w, "event: error\ndata: {\"error\": \"%s\"}\n\n", err.Error())
+		flusher.Flush()
+		return
+	}
+
+	// Stream logs as they arrive
+	for entry := range logChan {
+		data, _ := json.Marshal(entry)
+		fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	// Send completion event
+	fmt.Fprintf(w, "event: complete\ndata: {\"message\": \"stream ended\"}\n\n")
+	flusher.Flush()
+}
+
 func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	var req RunRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

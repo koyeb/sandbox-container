@@ -12,12 +12,14 @@ import (
 type Server struct {
 	sandboxSecret string
 	tcpProxy      *TCPProxy
+	processManager *ProcessManager
 }
 
 func New(sandboxSecret string) *Server {
 	return &Server{
 		sandboxSecret: sandboxSecret,
 		tcpProxy:      NewTCPProxy(),
+		processManager: NewProcessManager(),
 	}
 }
 
@@ -34,6 +36,10 @@ func (s *Server) RegisterRoutes() *http.ServeMux {
 	mux.Handle("/list_dir", s.authMiddleware(http.HandlerFunc(s.listDirHandler)))
 	mux.Handle("/bind_port", s.authMiddleware(http.HandlerFunc(s.bindPortHandler)))
 	mux.Handle("/unbind_port", s.authMiddleware(http.HandlerFunc(s.unbindPortHandler)))
+	mux.Handle("/start_process", s.authMiddleware(http.HandlerFunc(s.startProcessHandler)))
+	mux.Handle("/list_processes", s.authMiddleware(http.HandlerFunc(s.listProcessesHandler)))
+	mux.Handle("/kill_process", s.authMiddleware(http.HandlerFunc(s.killProcessHandler)))
+	mux.Handle("/process_logs_streaming", s.authMiddleware(http.HandlerFunc(s.processLogsStreamingHandler)))
 	return mux
 }
 
