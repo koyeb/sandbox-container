@@ -209,10 +209,6 @@ type BindPortRequest struct {
 	Port string `json:"port"`
 }
 
-type UnbindPortRequest struct {
-	Port string `json:"port"`
-}
-
 func (s *Server) bindPortHandler(w http.ResponseWriter, r *http.Request) {
 	var req BindPortRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -222,6 +218,20 @@ func (s *Server) bindPortHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.Port == "" {
 		http.Error(w, "Port is required", http.StatusBadRequest)
+		return
+	}
+
+	// Check if a port is already bound
+	currentPort := s.tcpProxy.GetTargetPort()
+	if currentPort != "" {
+		resp := map[string]interface{}{
+			"success":      false,
+			"error":        "Port already bound",
+			"current_port": currentPort,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(resp)
 		return
 	}
 
@@ -237,23 +247,6 @@ func (s *Server) bindPortHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) unbindPortHandler(w http.ResponseWriter, r *http.Request) {
-	var req UnbindPortRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	currentPort := s.tcpProxy.GetTargetPort()
-	if req.Port != "" && currentPort != req.Port {
-		resp := map[string]interface{}{
-			"success": false,
-			"error":   "Port mismatch",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-		return
-	}
-
 	s.tcpProxy.ClearTargetPort()
 
 	resp := map[string]interface{}{

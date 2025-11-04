@@ -448,9 +448,20 @@ curl -X POST http://localhost:8080/list_dir \
 - `message` (string): Confirmation message
 - `port` (string): The port that was bound
 
+**Error Response (Port Already Bound):**
+```json
+{
+  "success": false,
+  "error": "Port already bound",
+  "current_port": "8080"
+}
+```
+Returns HTTP 409 Conflict status code.
+
 **Notes:**
 - The TCP proxy listens on `PROXY_PORT` (default: 3031) and forwards traffic to the specified internal port
-- Only one port binding can be active at a time; binding a new port will override the previous binding
+- Only one port binding can be active at a time; attempting to bind when a port is already bound will return an error
+- You must unbind the current port before binding a new one
 - The port must be available and accessible within the sandbox environment
 
 **Example:**
@@ -471,15 +482,7 @@ curl -X POST http://localhost:8080/bind_port \
 
 **Description:** Removes the TCP proxy port binding, stopping traffic forwarding to the previously bound port.
 
-**Request Body:**
-```json
-{
-  "port": "8080"
-}
-```
-
-**Parameters:**
-- `port` (string, optional): The port number to unbind. If provided, it must match the currently bound port. If not provided, any existing binding will be removed.
+**Request Body:** None required
 
 **Response:**
 ```json
@@ -492,20 +495,16 @@ curl -X POST http://localhost:8080/bind_port \
 **Response Fields:**
 - `success` (boolean): Whether the operation succeeded
 - `message` (string): Confirmation message
-- `error` (string): Error message if the operation failed (only present on failure)
 
 **Notes:**
-- If a port is specified and doesn't match the currently bound port, the request will fail with a "Port mismatch" error
+- This endpoint unbinds any currently bound port
+- No parameters are required
 - After unbinding, the TCP proxy will no longer forward traffic
 
 **Example:**
 ```bash
 curl -X POST http://localhost:8080/unbind_port \
-  -H "Authorization: Bearer your-secret" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "port": "8080"
-  }'
+  -H "Authorization: Bearer your-secret"
 ```
 
 ---

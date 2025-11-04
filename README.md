@@ -151,17 +151,39 @@ Content-Type: application/json
 ```
 Configures the TCP proxy (listening on `PROXY_PORT`, default 3031) to forward traffic to the specified port. This allows you to expose services running inside the sandbox to external connections.
 
+**Response on Success:**
+```json
+{
+  "success": true,
+  "message": "Port binding configured",
+  "port": "8080"
+}
+```
+
+**Response on Error (Port Already Bound):**
+```json
+{
+  "success": false,
+  "error": "Port already bound",
+  "current_port": "8080"
+}
+```
+Returns HTTP 409 Conflict if a port is already bound.
+
 ### Unbind Port
 ```
 POST /unbind_port
 Authorization: Bearer <SANDBOX_SECRET>
-Content-Type: application/json
+```
+Removes the TCP proxy port binding for any currently bound port. No request body is required.
 
+**Response:**
+```json
 {
-  "port": "8080"
+  "success": true,
+  "message": "Port binding removed"
 }
 ```
-Removes the TCP proxy port binding. The `port` field is optional; if not provided, the current binding will be removed.
 
 ## Development
 
