@@ -112,6 +112,65 @@ func (s *Server) runHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+type BindPortRequest struct {
+	Port string `json:"port"`
+}
+
+type UnbindPortRequest struct {
+	Port string `json:"port"`
+}
+
+func (s *Server) bindPortHandler(w http.ResponseWriter, r *http.Request) {
+	var req BindPortRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if req.Port == "" {
+		http.Error(w, "Port is required", http.StatusBadRequest)
+		return
+	}
+
+	s.tcpProxy.SetTargetPort(req.Port)
+
+	resp := map[string]interface{}{
+		"success": true,
+		"message": "Port binding configured",
+		"port":    req.Port,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) unbindPortHandler(w http.ResponseWriter, r *http.Request) {
+	var req UnbindPortRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	currentPort := s.tcpProxy.GetTargetPort()
+	if req.Port != "" && currentPort != req.Port {
+		resp := map[string]interface{}{
+			"success": false,
+			"error":   "Port mismatch",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	s.tcpProxy.ClearTargetPort()
+
+	resp := map[string]interface{}{
+		"success": true,
+		"message": "Port binding removed",
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
 func (s *Server) deleteDirHandler(w http.ResponseWriter, r *http.Request) {
 	var req DeleteDirRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

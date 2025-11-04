@@ -28,7 +28,7 @@ make docker-run
 
 # Or manually with docker
 docker build -t koyeb/sandbox .
-docker run --rm -p 8000:8000 -e SANDBOX_SECRET=your-secret-here koyeb/sandbox
+docker run --rm -p 3030:3030 -p 3031:3031 -e SANDBOX_SECRET=your-secret-here koyeb/sandbox
 ```
 
 ### Building from Source
@@ -38,7 +38,7 @@ docker run --rm -p 8000:8000 -e SANDBOX_SECRET=your-secret-here koyeb/sandbox
 make build
 
 # Run locally
-SANDBOX_SECRET=your-secret-here PORT=8000 ./bin/sandbox-executor
+SANDBOX_SECRET=your-secret-here PORT=3030 ./bin/sandbox-executor
 ```
 
 ## Configuration
@@ -46,7 +46,8 @@ SANDBOX_SECRET=your-secret-here PORT=8000 ./bin/sandbox-executor
 The server requires the following environment variables:
 
 - `SANDBOX_SECRET` (required): Authentication token for API endpoints
-- `PORT` (optional): Server port, defaults to `8000`
+- `PORT` (optional): HTTP server port, defaults to `3030`
+- `PROXY_PORT` (optional): TCP proxy server port, defaults to `3031`
 
 ## API Endpoints
 
@@ -137,6 +138,30 @@ Content-Type: application/json
   "path": "/tmp"
 }
 ```
+
+### Bind Port
+```
+POST /bind_port
+Authorization: Bearer <SANDBOX_SECRET>
+Content-Type: application/json
+
+{
+  "port": "8080"
+}
+```
+Configures the TCP proxy (listening on `PROXY_PORT`, default 3031) to forward traffic to the specified port. This allows you to expose services running inside the sandbox to external connections.
+
+### Unbind Port
+```
+POST /unbind_port
+Authorization: Bearer <SANDBOX_SECRET>
+Content-Type: application/json
+
+{
+  "port": "8080"
+}
+```
+Removes the TCP proxy port binding. The `port` field is optional; if not provided, the current binding will be removed.
 
 ## Development
 
