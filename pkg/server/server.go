@@ -25,6 +25,7 @@ func (s *Server) RegisterRoutes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.healthHandler)
 	mux.Handle("/run", s.authMiddleware(http.HandlerFunc(s.runHandler)))
+	mux.Handle("/run_streaming", s.authMiddleware(http.HandlerFunc(s.runStreamingHandler)))
 	mux.Handle("/write_file", s.authMiddleware(http.HandlerFunc(s.writeFileHandler)))
 	mux.Handle("/read_file", s.authMiddleware(http.HandlerFunc(s.readFileHandler)))
 	mux.Handle("/delete_file", s.authMiddleware(http.HandlerFunc(s.deleteFileHandler)))

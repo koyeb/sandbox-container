@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -110,6 +112,97 @@ func (s *Server) runHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
+	var req RunRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// Set headers for SSE
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	cmd := exec.Command("sh", "-c", req.Cmd)
+
+	// Set working directory if provided
+	if req.Cwd != "" {
+		cmd.Dir = req.Cwd
+	}
+
+	// Set environment variables if provided
+	if len(req.Env) > 0 {
+		cmd.Env = os.Environ()
+		for key, value := range req.Env {
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		fmt.Fprintf(w, "event: error\ndata: {\"error\": \"Failed to get stdout\"}\n\n")
+		flusher.Flush()
+		return
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		fmt.Fprintf(w, "event: error\ndata: {\"error\": \"Failed to get stderr\"}\n\n")
+		flusher.Flush()
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(w, "event: error\ndata: {\"error\": \"Failed to start command\"}\n\n")
+		flusher.Flush()
+		return
+	}
+
+	// Stream stdout
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			data, _ := json.Marshal(map[string]string{"stream": "stdout", "data": line})
+			fmt.Fprintf(w, "event: output\ndata: %s\n\n", data)
+			flusher.Flush()
+		}
+	}()
+
+	// Stream stderr
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			data, _ := json.Marshal(map[string]string{"stream": "stderr", "data": line})
+			fmt.Fprintf(w, "event: output\ndata: %s\n\n", data)
+			flusher.Flush()
+		}
+	}()
+
+	// Wait for command to finish
+	err = cmd.Wait()
+	exitCode := 0
+	if cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
+	}
+
+	// Send completion event
+	completeData, _ := json.Marshal(map[string]interface{}{
+		"code":  exitCode,
+		"error": err != nil,
+	})
+	fmt.Fprintf(w, "event: complete\ndata: %s\n\n", completeData)
+	flusher.Flush()
 }
 
 type BindPortRequest struct {

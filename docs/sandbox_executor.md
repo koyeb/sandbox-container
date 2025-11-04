@@ -84,6 +84,104 @@ curl -X POST http://localhost:8080/run \
 
 ---
 
+### Run Command (Streaming)
+
+**Endpoint:** `POST /run_streaming`
+
+**Description:** Executes a shell command in the sandbox environment and streams the output in real-time using Server-Sent Events (SSE).
+
+**Request Body:**
+```json
+{
+  "cmd": "echo 'Hello World'",
+  "cwd": "/path/to/working/directory",
+  "env": {
+    "VAR_NAME": "value",
+    "ANOTHER_VAR": "another_value"
+  }
+}
+```
+
+**Parameters:**
+- `cmd` (string, required): The shell command to execute
+- `cwd` (string, optional): Working directory for the command execution
+- `env` (object, optional): Environment variables to set/override for the command
+
+**Response:** Server-Sent Events stream with the following event types:
+
+1. **output** events (sent as command produces output):
+```json
+{
+  "stream": "stdout",
+  "data": "line of output"
+}
+```
+or
+```json
+{
+  "stream": "stderr",
+  "data": "line of error output"
+}
+```
+
+2. **complete** event (sent when command finishes):
+```json
+{
+  "code": 0,
+  "error": false
+}
+```
+
+3. **error** event (sent if command fails to start):
+```json
+{
+  "error": "error message"
+}
+```
+
+**Response Format:**
+- Uses Server-Sent Events (SSE) protocol
+- Content-Type: `text/event-stream`
+- Each event follows SSE format: `event: <type>\ndata: <json>\n\n`
+- Connection stays open until command completes
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/run_streaming \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -N \
+  -d '{
+    "cmd": "for i in 1 2 3; do echo $i; sleep 1; done",
+    "cwd": "/tmp"
+  }'
+```
+
+**Example Response Stream:**
+```
+event: output
+data: {"stream":"stdout","data":"1"}
+
+event: output
+data: {"stream":"stdout","data":"2"}
+
+event: output
+data: {"stream":"stdout","data":"3"}
+
+event: complete
+data: {"code":0,"error":false}
+
+```
+
+**Notes:**
+- Use this endpoint for long-running commands where you want real-time output
+- stdout and stderr are streamed line-by-line as they are produced
+- Both streams are processed concurrently
+- The connection remains open until the command completes
+- For simple commands where buffered output is acceptable, use `/run` instead
+
+---
+
 ### Write File
 
 **Endpoint:** `POST /write_file`
