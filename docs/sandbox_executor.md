@@ -418,6 +418,98 @@ curl -X POST http://localhost:8080/list_dir \
 
 ---
 
+### Bind Port
+
+**Endpoint:** `POST /bind_port`
+
+**Description:** Configures the TCP proxy to forward traffic to a specified port inside the sandbox. This allows you to expose services running inside the sandbox to external connections.
+
+**Request Body:**
+```json
+{
+  "port": "8080"
+}
+```
+
+**Parameters:**
+- `port` (string, required): The port number to bind to (as a string)
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Port binding configured",
+  "port": "8080"
+}
+```
+
+**Response Fields:**
+- `success` (boolean): Whether the operation succeeded
+- `message` (string): Confirmation message
+- `port` (string): The port that was bound
+
+**Notes:**
+- The TCP proxy listens on `PROXY_PORT` (default: 3031) and forwards traffic to the specified internal port
+- Only one port binding can be active at a time; binding a new port will override the previous binding
+- The port must be available and accessible within the sandbox environment
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/bind_port \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "port": "8080"
+  }'
+```
+
+---
+
+### Unbind Port
+
+**Endpoint:** `POST /unbind_port`
+
+**Description:** Removes the TCP proxy port binding, stopping traffic forwarding to the previously bound port.
+
+**Request Body:**
+```json
+{
+  "port": "8080"
+}
+```
+
+**Parameters:**
+- `port` (string, optional): The port number to unbind. If provided, it must match the currently bound port. If not provided, any existing binding will be removed.
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Port binding removed"
+}
+```
+
+**Response Fields:**
+- `success` (boolean): Whether the operation succeeded
+- `message` (string): Confirmation message
+- `error` (string): Error message if the operation failed (only present on failure)
+
+**Notes:**
+- If a port is specified and doesn't match the currently bound port, the request will fail with a "Port mismatch" error
+- After unbinding, the TCP proxy will no longer forward traffic
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/unbind_port \
+  -H "Authorization: Bearer your-secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "port": "8080"
+  }'
+```
+
+---
+
 ## Error Handling
 
 All endpoints return appropriate HTTP status codes:
