@@ -241,23 +241,15 @@ func (s *Server) killProcessHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-type ProcessLogsStreamingRequest struct {
-	ID string `json:"id"`
-}
-
 func (s *Server) processLogsStreamingHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var req ProcessLogsStreamingRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	if req.ID == "" {
+	// Get process ID from query parameter
+	processID := r.URL.Query().Get("id")
+	if processID == "" {
 		http.Error(w, "Process ID is required", http.StatusBadRequest)
 		return
 	}
@@ -273,7 +265,7 @@ func (s *Server) processLogsStreamingHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	logChan, err := s.processManager.StreamProcessLogs(req.ID)
+	logChan, err := s.processManager.StreamProcessLogs(processID)
 	if err != nil {
 		fmt.Fprintf(w, "event: error\ndata: {\"error\": \"%s\"}\n\n", err.Error())
 		flusher.Flush()

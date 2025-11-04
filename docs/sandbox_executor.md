@@ -735,19 +735,17 @@ curl -X POST http://localhost:8080/kill_process \
 
 ### Stream Process Logs
 
-**Endpoint:** `POST /process_logs_streaming`
+**Endpoint:** `GET /process_logs_streaming`
 
-**Description:** Streams the logs (stdout and stderr) of a process in real-time using Server-Sent Events (SSE). Historical logs are sent first, followed by new logs as they arrive.
+**Description:** Streams the logs (stdout and stderr) of a process in real-time using Server-Sent Events (SSE). The process ID is passed as a query parameter. Historical logs are sent first, followed by new logs as they arrive.
 
-**Request Body:**
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000"
-}
-```
-
-**Parameters:**
+**Query Parameters:**
 - `id` (string, required): The unique process ID returned by `/start_process`
+
+**Example URL:**
+```
+GET /process_logs_streaming?id=550e8400-e29b-41d4-a716-446655440000
+```
 
 **Response (200 OK):** Server-Sent Events stream with log entries
 
@@ -797,13 +795,9 @@ or
 
 **Example:**
 ```bash
-curl -X POST http://localhost:8080/process_logs_streaming \
+curl -X GET "http://localhost:8080/process_logs_streaming?id=550e8400-e29b-41d4-a716-446655440000" \
   -H "Authorization: Bearer your-secret" \
-  -H "Content-Type: application/json" \
-  -N \
-  -d '{
-    "id": "550e8400-e29b-41d4-a716-446655440000"
-  }'
+  -N
 ```
 
 **Example Response Stream:**
@@ -832,15 +826,12 @@ data: {"message":"stream ended"}
 
 **JavaScript Example:**
 ```javascript
-const response = await fetch('http://localhost:8080/process_logs_streaming', {
-  method: 'POST',
+const processId = '550e8400-e29b-41d4-a716-446655440000';
+const response = await fetch(`http://localhost:8080/process_logs_streaming?id=${processId}`, {
+  method: 'GET',
   headers: {
     'Authorization': 'Bearer your-secret',
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({
-    id: '550e8400-e29b-41d4-a716-446655440000'
-  })
+  }
 });
 
 const reader = response.body.getReader();
@@ -869,13 +860,13 @@ while (true) {
 import requests
 import json
 
-response = requests.post(
-    'http://localhost:8080/process_logs_streaming',
+process_id = '550e8400-e29b-41d4-a716-446655440000'
+
+response = requests.get(
+    f'http://localhost:8080/process_logs_streaming?id={process_id}',
     headers={
-        'Authorization': 'Bearer your-secret',
-        'Content-Type': 'application/json'
+        'Authorization': 'Bearer your-secret'
     },
-    json={'id': '550e8400-e29b-41d4-a716-446655440000'},
     stream=True
 )
 
@@ -948,11 +939,9 @@ curl -X GET http://localhost:8080/list_processes \
   -H "Authorization: Bearer your-secret" | jq
 
 # Stream logs from specific worker
-curl -X POST http://localhost:8080/process_logs_streaming \
+curl -X GET "http://localhost:8080/process_logs_streaming?id=$WORKER_1" \
   -H "Authorization: Bearer your-secret" \
-  -H "Content-Type: application/json" \
-  -N \
-  -d "{\"id\": \"$WORKER_1\"}"
+  -N
 ```
 
 ---
