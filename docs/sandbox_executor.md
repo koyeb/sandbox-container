@@ -212,7 +212,6 @@ data: {"code":0,"error":false}
 ```
 
 **Notes:**
-- Use this endpoint for long-running commands where you want real-time output
 - stdout and stderr are streamed line-by-line as they are produced
 - Both streams are processed concurrently
 - The connection remains open until the command completes
@@ -636,27 +635,30 @@ curl -X POST http://localhost:8080/start_process \
     {
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "pid": 12345,
-      "status": "running"
+      "status": "running",
+      "command": "python train.py"
     },
     {
       "id": "660e8400-e29b-41d4-a716-446655440001",
       "pid": 12346,
-      "status": "completed"
+      "status": "completed",
+      "command": "npm install"
     },
     {
       "id": "770e8400-e29b-41d4-a716-446655440002",
       "pid": 12347,
-      "status": "killed"
+      "status": "killed",
+      "command": "sleep 1000"
     }
   ]
 }
 ```
 
 **Response Fields:**
-- `processes` (array): List of all processes
   - `id` (string): Unique UUID identifier for the process
   - `pid` (integer): Operating system process ID
   - `status` (string): Current process status
+  - `command` (string): The command that was executed
 
 **Notes:**
 - Returns all processes regardless of status

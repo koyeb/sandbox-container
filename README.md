@@ -276,12 +276,14 @@ Returns all processes (running, completed, failed, or killed).
     {
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "pid": 12345,
-      "status": "running"
+      "status": "running",
+      "command": "python train.py"
     },
     {
       "id": "660e8400-e29b-41d4-a716-446655440001",
       "pid": 12346,
-      "status": "completed"
+      "status": "completed",
+      "command": "npm install"
     }
   ]
 }

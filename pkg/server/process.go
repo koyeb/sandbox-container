@@ -360,5 +360,6 @@ func (p *Process) ToSummaryJSON() map[string]interface{} {
 		"id":     p.ID,
 		"pid":    p.PID,
 		"status": p.Status,
+		"command": p.Command,
 	}
 }
