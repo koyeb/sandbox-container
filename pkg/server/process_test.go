@@ -215,12 +215,24 @@ func TestProcess_ToSummaryJSON(t *testing.T) {
 
 	json := process.ToSummaryJSON()
 
-	if len(json) != 3 {
-		t.Errorf("Expected 3 fields in summary, got %d", len(json))
+	if len(json) != 4 {
+		t.Errorf("Expected 4 fields in summary, got %d", len(json))
 	}
 
 	if json["id"] != "test-id" {
 		t.Errorf("Expected id 'test-id', got %v", json["id"])
+	}
+
+	if json["pid"] != 12345 {
+		t.Errorf("Expected pid 12345, got %v", json["pid"])
+	}
+
+	if json["status"] != ProcessStatusRunning {
+		t.Errorf("Expected status Running, got %v", json["status"])
+	}
+
+	if json["command"] != "echo test" {
+		t.Errorf("Expected command 'echo test', got %v", json["command"])
 	}
 }
 
