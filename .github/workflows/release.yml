@@ -20,12 +20,10 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Test
-        run: go test -v ./...
+        run: make test
 
       - name: Build
-        run: |
-          mkdir -p bin
-          go build -o bin/sandbox-executor ./cmd/sandbox-executor
+        run: make build
 
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/')
