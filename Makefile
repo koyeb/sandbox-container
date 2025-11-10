@@ -8,7 +8,7 @@ PLATFORM?=linux/amd64
 build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 go build -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/sandbox-executor
+	CGO_ENABLED=0 go build -ldflags="-s -w"  -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/sandbox-executor
 
 clean:
 	@echo "Cleaning..."
