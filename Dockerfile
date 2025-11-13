@@ -24,4 +24,4 @@ RUN apt-get update && apt-get install -y \
 COPY --from=builder /app/sandbox-executor /usr/bin/sandbox-executor
 
 
-CMD ["/usr/bin/sandbox-executor"]
+ENTRYPOINT ["/usr/bin/sandbox-executor"]
