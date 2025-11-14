@@ -4,7 +4,7 @@ ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /app
 COPY . .
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o sandbox-executor ./cmd/sandbox-executor
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o sandbox-executor ./cmd/sandbox-executor
 
 
 # run stage
@@ -24,4 +24,6 @@ RUN apt-get update && apt-get install -y \
 COPY --from=builder /app/sandbox-executor /usr/bin/sandbox-executor
 
 
-ENTRYPOINT ["/usr/bin/sandbox-executor"]
+# The entrypoint and mounting latest version of the executor is directly managed by koyeb platform
+# to develop on the sandbox-executor, you can uncomment the following line and use koyeb-sdk with your custom image
+#ENTRYPOINT ["/usr/bin/sandbox-executor"]

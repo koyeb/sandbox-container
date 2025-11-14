@@ -40,6 +40,6 @@ docker-push:
 
 docker-run: docker-build
 	@echo "Running Docker container..."
-	docker run --rm -p 3030:3030 -p 3031:3031 -e SANDBOX_SECRET=test-secret $(DOCKER_IMAGE)
+	docker run --rm -p 3030:3030 -p 3031:3031 -e SANDBOX_SECRET=test-secret --entrypoint /usr/bin/sandbox-executor $(DOCKER_IMAGE)
 
 .DEFAULT_GOAL := build
