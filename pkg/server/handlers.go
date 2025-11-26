@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 type RunRequest struct {
@@ -179,7 +180,7 @@ func (s *Server) listProcessesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	processes := s.processManager.ListProcesses()
-	
+
 	processesData := make([]map[string]interface{}, len(processes))
 	for i, p := range processes {
 		processesData[i] = p.ToSummaryJSON()
@@ -286,9 +287,28 @@ func (s *Server) processLogsStreamingHandler(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	var req RunRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
+	switch r.Method {
+	case http.MethodPost:
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
+		}
+	case http.MethodGet:
+		req.Cmd = r.URL.Query().Get("cmd")
+		if req.Cmd == "" {
+			http.Error(w, "Command is required", http.StatusBadRequest)
+			return
+		}
+		req.Cwd = r.URL.Query().Get("cwd")
+		// envs can be passed as multiple query parameters: ?env=key=value
+		envs := r.URL.Query()["env"]
+		req.Env = make(map[string]string)
+		for _, env := range envs {
+			parts := strings.SplitN(env, "=", 2)
+			if len(parts) == 2 {
+				req.Env[parts[0]] = parts[1]
+			}
+		}
 	}
 
 	// Set headers for SSE
