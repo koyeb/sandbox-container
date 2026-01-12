@@ -2,12 +2,15 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"sync"
 )
 
 type RunRequest struct {
@@ -179,7 +182,7 @@ func (s *Server) listProcessesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	processes := s.processManager.ListProcesses()
-	
+
 	processesData := make([]map[string]interface{}, len(processes))
 	for i, p := range processes {
 		processesData[i] = p.ToSummaryJSON()
@@ -265,23 +268,32 @@ func (s *Server) processLogsStreamingHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Mutex to synchronize flusher access
+	var writeMutex sync.Mutex
+
 	logChan, err := s.processManager.StreamProcessLogs(processID)
 	if err != nil {
+		writeMutex.Lock()
 		fmt.Fprintf(w, "event: error\ndata: {\"error\": \"%s\"}\n\n", err.Error())
 		flusher.Flush()
+		writeMutex.Unlock()
 		return
 	}
 
 	// Stream logs as they arrive
 	for entry := range logChan {
 		data, _ := json.Marshal(entry)
+		writeMutex.Lock()
 		fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
 		flusher.Flush()
+		writeMutex.Unlock()
 	}
 
 	// Send completion event
+	writeMutex.Lock()
 	fmt.Fprintf(w, "event: complete\ndata: {\"message\": \"stream ended\"}\n\n")
 	flusher.Flush()
+	writeMutex.Unlock()
 }
 
 func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
@@ -302,7 +314,14 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := exec.Command("sh", "-c", req.Cmd)
+	// Mutex to synchronize flusher access
+	var writeMutex sync.Mutex
+
+	// Create context for goroutine lifecycle management
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", req.Cmd)
 
 	// Set working directory if provided
 	if req.Cwd != "" {
@@ -319,45 +338,64 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		writeMutex.Lock()
 		fmt.Fprintf(w, "event: error\ndata: {\"error\": \"Failed to get stdout\"}\n\n")
 		flusher.Flush()
+		writeMutex.Unlock()
 		return
 	}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		writeMutex.Lock()
 		fmt.Fprintf(w, "event: error\ndata: {\"error\": \"Failed to get stderr\"}\n\n")
 		flusher.Flush()
+		writeMutex.Unlock()
 		return
 	}
 
-	if err := cmd.Start(); err != nil {
+	if err = cmd.Start(); err != nil {
+		writeMutex.Lock()
 		fmt.Fprintf(w, "event: error\ndata: {\"error\": \"Failed to start command\"}\n\n")
 		flusher.Flush()
+		writeMutex.Unlock()
 		return
 	}
 
+	// WaitGroup to track completion of both stdout and stderr goroutines
+	var wg sync.WaitGroup
+
 	// Stream stdout
-	go func() {
+	wg.Go(func() {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
 			data, _ := json.Marshal(map[string]string{"stream": "stdout", "data": line})
+			writeMutex.Lock()
 			fmt.Fprintf(w, "event: output\ndata: %s\n\n", data)
 			flusher.Flush()
+			writeMutex.Unlock()
 		}
-	}()
+		if scanErr := scanner.Err(); scanErr != nil {
+			log.Println("stdout scanner error:", scanErr.Error())
+		}
+	})
 
 	// Stream stderr
-	go func() {
+	wg.Go(func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			line := scanner.Text()
 			data, _ := json.Marshal(map[string]string{"stream": "stderr", "data": line})
+			writeMutex.Lock()
 			fmt.Fprintf(w, "event: output\ndata: %s\n\n", data)
 			flusher.Flush()
+			writeMutex.Unlock()
 		}
-	}()
+		if scanErr := scanner.Err(); scanErr != nil {
+			log.Println("stderr scanner error:", scanErr.Error())
+		}
+	})
 
 	// Wait for command to finish
 	err = cmd.Wait()
@@ -366,13 +404,18 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 		exitCode = cmd.ProcessState.ExitCode()
 	}
 
+	// Wait for both stdout and stderr goroutines to finish processing all output
+	wg.Wait()
+
 	// Send completion event
 	completeData, _ := json.Marshal(map[string]interface{}{
 		"code":  exitCode,
 		"error": err != nil,
 	})
+	writeMutex.Lock()
 	fmt.Fprintf(w, "event: complete\ndata: %s\n\n", completeData)
 	flusher.Flush()
+	writeMutex.Unlock()
 }
 
 type BindPortRequest struct {
