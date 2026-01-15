@@ -2,13 +2,50 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"sync"
 )
+
+// sseWriter provides thread-safe writing for Server-Sent Events
+type sseWriter struct {
+	w       http.ResponseWriter
+	mu      sync.Mutex
+	flusher http.Flusher
+}
+
+func newSSEWriter(w http.ResponseWriter) (*sseWriter, error) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return nil, fmt.Errorf("streaming unsupported")
+	}
+	return &sseWriter{
+		w:       w,
+		flusher: flusher,
+	}, nil
+}
+
+func (s *sseWriter) writeEvent(event, data string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, data)
+	s.flusher.Flush()
+}
+
+func (s *sseWriter) writeEventf(event, format string, args ...interface{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fmt.Fprintf(s.w, "event: %s\ndata: ", event)
+	fmt.Fprintf(s.w, format, args...)
+	fmt.Fprintf(s.w, "\n\n")
+	s.flusher.Flush()
+}
 
 type RunRequest struct {
 	Cmd string            `json:"cmd"`
@@ -179,7 +216,7 @@ func (s *Server) listProcessesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	processes := s.processManager.ListProcesses()
-	
+
 	processesData := make([]map[string]interface{}, len(processes))
 	for i, p := range processes {
 		processesData[i] = p.ToSummaryJSON()
@@ -259,29 +296,26 @@ func (s *Server) processLogsStreamingHandler(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+	writer, err := newSSEWriter(w)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	logChan, err := s.processManager.StreamProcessLogs(processID)
 	if err != nil {
-		fmt.Fprintf(w, "event: error\ndata: {\"error\": \"%s\"}\n\n", err.Error())
-		flusher.Flush()
+		writer.writeEventf("error", "{\"error\": \"%s\"}", err.Error())
 		return
 	}
 
 	// Stream logs as they arrive
 	for entry := range logChan {
 		data, _ := json.Marshal(entry)
-		fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
-		flusher.Flush()
+		writer.writeEvent("log", string(data))
 	}
 
 	// Send completion event
-	fmt.Fprintf(w, "event: complete\ndata: {\"message\": \"stream ended\"}\n\n")
-	flusher.Flush()
+	writer.writeEvent("complete", "{\"message\": \"stream ended\"}")
 }
 
 func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
@@ -296,13 +330,17 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+	writer, err := newSSEWriter(w)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	cmd := exec.Command("sh", "-c", req.Cmd)
+	// Create context for goroutine lifecycle management
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", req.Cmd)
 
 	// Set working directory if provided
 	if req.Cwd != "" {
@@ -319,45 +357,49 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		fmt.Fprintf(w, "event: error\ndata: {\"error\": \"Failed to get stdout\"}\n\n")
-		flusher.Flush()
+		writer.writeEvent("error", "{\"error\": \"Failed to get stdout\"}")
 		return
 	}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		fmt.Fprintf(w, "event: error\ndata: {\"error\": \"Failed to get stderr\"}\n\n")
-		flusher.Flush()
+		writer.writeEvent("error", "{\"error\": \"Failed to get stderr\"}")
 		return
 	}
 
-	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(w, "event: error\ndata: {\"error\": \"Failed to start command\"}\n\n")
-		flusher.Flush()
+	if err = cmd.Start(); err != nil {
+		writer.writeEvent("error", "{\"error\": \"Failed to start command\"}")
 		return
 	}
+
+	// WaitGroup to track completion of both stdout and stderr goroutines
+	var wg sync.WaitGroup
 
 	// Stream stdout
-	go func() {
+	wg.Go(func() {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
 			data, _ := json.Marshal(map[string]string{"stream": "stdout", "data": line})
-			fmt.Fprintf(w, "event: output\ndata: %s\n\n", data)
-			flusher.Flush()
+			writer.writeEvent("output", string(data))
 		}
-	}()
+		if scanErr := scanner.Err(); scanErr != nil {
+			log.Println("stdout scanner error:", scanErr.Error())
+		}
+	})
 
 	// Stream stderr
-	go func() {
+	wg.Go(func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			line := scanner.Text()
 			data, _ := json.Marshal(map[string]string{"stream": "stderr", "data": line})
-			fmt.Fprintf(w, "event: output\ndata: %s\n\n", data)
-			flusher.Flush()
+			writer.writeEvent("output", string(data))
 		}
-	}()
+		if scanErr := scanner.Err(); scanErr != nil {
+			log.Println("stderr scanner error:", scanErr.Error())
+		}
+	})
 
 	// Wait for command to finish
 	err = cmd.Wait()
@@ -366,13 +408,15 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 		exitCode = cmd.ProcessState.ExitCode()
 	}
 
+	// Wait for both stdout and stderr goroutines to finish processing all output
+	wg.Wait()
+
 	// Send completion event
 	completeData, _ := json.Marshal(map[string]interface{}{
 		"code":  exitCode,
 		"error": err != nil,
 	})
-	fmt.Fprintf(w, "event: complete\ndata: %s\n\n", completeData)
-	flusher.Flush()
+	writer.writeEvent("complete", string(completeData))
 }
 
 type BindPortRequest struct {
