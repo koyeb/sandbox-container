@@ -2,9 +2,10 @@
 FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH
+ARG VERSION=dev
 WORKDIR /app
 COPY . .
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o sandbox-executor ./cmd/sandbox-executor
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w -X main.Version=${VERSION}" -o sandbox-executor ./cmd/sandbox-executor
 
 
 # run stage

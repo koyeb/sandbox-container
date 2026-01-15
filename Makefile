@@ -4,11 +4,12 @@ BINARY_NAME=sandbox-executor
 BUILD_DIR=bin
 DOCKER_IMAGE=koyeb/sandbox
 PLATFORM?=linux/amd64
+VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
 build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 go build -ldflags="-s -w"  -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/sandbox-executor
+	CGO_ENABLED=0 go build -ldflags="-s -w -X main.Version=$(VERSION)"  -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/sandbox-executor
 
 clean:
 	@echo "Cleaning..."
@@ -28,15 +29,15 @@ install: build
 
 docker-build:
 	@echo "Building Docker image $(DOCKER_IMAGE) for $(PLATFORM)..."
-	docker buildx build --platform $(PLATFORM) -t $(DOCKER_IMAGE) .
+	docker buildx build --platform $(PLATFORM) --build-arg VERSION=$(VERSION) -t $(DOCKER_IMAGE) .
 
 docker-buildx:
 	@echo "Building Docker image $(DOCKER_IMAGE) for multiple platforms..."
-	docker buildx build --platform linux/amd64,linux/arm64 -t $(DOCKER_IMAGE) .
+	docker buildx build --platform linux/amd64,linux/arm64 --build-arg VERSION=$(VERSION) -t $(DOCKER_IMAGE) .
 
 docker-push:
 	@echo "Building and pushing Docker image $(DOCKER_IMAGE) for multiple platforms..."
-	docker buildx build --platform linux/amd64,linux/arm64 -t $(DOCKER_IMAGE) --push .
+	docker buildx build --platform linux/amd64,linux/arm64 --build-arg VERSION=$(VERSION) -t $(DOCKER_IMAGE) --push .
 
 docker-run: docker-build
 	@echo "Running Docker container..."

@@ -10,15 +10,15 @@ import (
 )
 
 type Server struct {
-	sandboxSecret string
-	tcpProxy      *TCPProxy
+	sandboxSecret  string
+	tcpProxy       *TCPProxy
 	processManager *ProcessManager
 }
 
 func New(sandboxSecret string) *Server {
 	return &Server{
-		sandboxSecret: sandboxSecret,
-		tcpProxy:      NewTCPProxy(),
+		sandboxSecret:  sandboxSecret,
+		tcpProxy:       NewTCPProxy(),
 		processManager: NewProcessManager(),
 	}
 }

@@ -6,10 +6,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/koyeb/sandbox-container/pkg/server"
+)
+
+var (
+	// Version is set via ldflags during build
+	Version = "dev"
 )
 
 func main() {
