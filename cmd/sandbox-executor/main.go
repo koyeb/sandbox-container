@@ -16,11 +16,16 @@ import (
 // Version is set via ldflags during build
 var Version = "dev"
 
+// LevelTrace is a custom log level below DEBUG for very verbose logging
+const LevelTrace = slog.Level(-8)
+
 func main() {
 	// Configure logger based on LOG_LEVEL environment variable
 	logLevel := os.Getenv("LOG_LEVEL")
 	var level slog.Level
 	switch strings.ToUpper(logLevel) {
+	case "TRACE":
+		level = LevelTrace
 	case "DEBUG":
 		level = slog.LevelDebug
 	case "INFO", "":
@@ -33,8 +38,18 @@ func main() {
 		level = slog.LevelInfo
 	}
 
+	// Create a custom handler that properly formats the TRACE level
 	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: level,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.LevelKey {
+				level := a.Value.Any().(slog.Level)
+				if level == LevelTrace {
+					a.Value = slog.StringValue("TRACE")
+				}
+			}
+			return a
+		},
 	})
 	logger := slog.New(handler)
 	slog.SetDefault(logger)

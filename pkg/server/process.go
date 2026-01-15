@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sync"
@@ -102,6 +103,8 @@ func NewProcessManager() *ProcessManager {
 func (pm *ProcessManager) StartProcess(command, cwd string, env map[string]string) (*Process, error) {
 	id := uuid.New().String()
 
+	slog.Debug("Starting background process", "id", id, "cmd", command, "cwd", cwd, "env", env)
+
 	cmd := exec.Command("sh", "-c", command)
 
 	if cwd != "" {
@@ -131,20 +134,24 @@ func (pm *ProcessManager) StartProcess(command, cwd string, env map[string]strin
 	// Get pipes for stdout and stderr
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
+		slog.Debug("Failed to create stdout pipe for process", "id", id, "error", err)
 		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
+		slog.Debug("Failed to create stderr pipe for process", "id", id, "error", err)
 		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
 	}
 
 	// Start the command
 	if err := cmd.Start(); err != nil {
+		slog.Debug("Failed to start process", "id", id, "cmd", command, "error", err)
 		return nil, fmt.Errorf("failed to start command: %w", err)
 	}
 
 	process.PID = cmd.Process.Pid
+	slog.Debug("Process started successfully", "id", id, "pid", process.PID)
 
 	// Register the process
 	pm.mu.Lock()
@@ -171,6 +178,8 @@ func (pm *ProcessManager) captureOutput(process *Process, pipe io.Reader, stream
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		slog.Debug("Process output", "id", process.ID, "stream", stream, "line", line)
+
 		entry := LogEntry{
 			Timestamp: time.Now(),
 			Stream:    stream,
@@ -211,15 +220,19 @@ func (pm *ProcessManager) waitForCompletion(process *Process) {
 		if process.cmd.ProcessState.ExitCode() == -1 {
 			// Process was killed
 			process.Status = ProcessStatusKilled
+			slog.Debug("Process killed", "id", process.ID, "pid", process.PID)
 		} else {
 			process.Status = ProcessStatusFailed
+			slog.Debug("Process failed", "id", process.ID, "pid", process.PID, "error", err)
 		}
 	} else {
 		process.Status = ProcessStatusCompleted
+		slog.Debug("Process completed successfully", "id", process.ID, "pid", process.PID)
 	}
 
 	exitCode := process.cmd.ProcessState.ExitCode()
 	process.ExitCode = &exitCode
+	slog.Debug("Process exit", "id", process.ID, "pid", process.PID, "exit_code", exitCode)
 
 	close(process.done)
 }
@@ -260,6 +273,7 @@ func (pm *ProcessManager) KillProcess(id string) error {
 	process.mu.RLock()
 	cmd := process.cmd
 	status := process.Status
+	pid := process.PID
 	process.mu.RUnlock()
 
 	if status != ProcessStatusRunning {
@@ -270,6 +284,7 @@ func (pm *ProcessManager) KillProcess(id string) error {
 		return fmt.Errorf("process has no PID")
 	}
 
+	slog.Debug("Killing process", "id", id, "pid", pid)
 	return cmd.Process.Kill()
 }
 
@@ -357,9 +372,9 @@ func (p *Process) ToSummaryJSON() map[string]interface{} {
 	defer p.mu.RUnlock()
 
 	return map[string]interface{}{
-		"id":     p.ID,
-		"pid":    p.PID,
-		"status": p.Status,
+		"id":      p.ID,
+		"pid":     p.PID,
+		"status":  p.Status,
 		"command": p.Command,
 	}
 }
