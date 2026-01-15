@@ -3,7 +3,7 @@ package server
 import (
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -108,7 +108,7 @@ func (s *Server) StartTCPProxy(port string) error {
 		// Connect to target port
 		targetConn, err := DialTCP("localhost:" + targetPort)
 		if err != nil {
-			log.Printf("Failed to connect to target port %s: %v", targetPort, err)
+			slog.Debug("Failed to connect to target port", "port", targetPort, "error", err)
 			return
 		}
 		defer targetConn.Close()

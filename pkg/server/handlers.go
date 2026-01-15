@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -384,7 +384,7 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 			writer.writeEvent("output", string(data))
 		}
 		if scanErr := scanner.Err(); scanErr != nil {
-			log.Println("stdout scanner error:", scanErr.Error())
+			slog.Debug("stdout scanner error", "error", scanErr.Error())
 		}
 	})
 
@@ -397,7 +397,7 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 			writer.writeEvent("output", string(data))
 		}
 		if scanErr := scanner.Err(); scanErr != nil {
-			log.Println("stderr scanner error:", scanErr.Error())
+			slog.Debug("stderr scanner error", "error", scanErr.Error())
 		}
 	})
 
