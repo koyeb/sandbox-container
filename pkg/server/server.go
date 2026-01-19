@@ -3,22 +3,22 @@ package server
 import (
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 )
 
 type Server struct {
-	sandboxSecret string
-	tcpProxy      *TCPProxy
+	sandboxSecret  string
+	tcpProxy       *TCPProxy
 	processManager *ProcessManager
 }
 
 func New(sandboxSecret string) *Server {
 	return &Server{
-		sandboxSecret: sandboxSecret,
-		tcpProxy:      NewTCPProxy(),
+		sandboxSecret:  sandboxSecret,
+		tcpProxy:       NewTCPProxy(),
 		processManager: NewProcessManager(),
 	}
 }
@@ -108,7 +108,7 @@ func (s *Server) StartTCPProxy(port string) error {
 		// Connect to target port
 		targetConn, err := DialTCP("localhost:" + targetPort)
 		if err != nil {
-			log.Printf("Failed to connect to target port %s: %v", targetPort, err)
+			slog.Debug("Failed to connect to target port", "port", targetPort, "error", err)
 			return
 		}
 		defer targetConn.Close()

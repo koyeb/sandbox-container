@@ -2,20 +2,62 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/koyeb/sandbox-container/pkg/server"
 )
 
+// Version is set via ldflags during build
+var Version = "dev"
+
+// LevelTrace is a custom log level below DEBUG for very verbose logging
+const LevelTrace = slog.Level(-8)
+
 func main() {
+	// Configure logger based on LOG_LEVEL environment variable
+	logLevel := os.Getenv("LOG_LEVEL")
+	var level slog.Level
+	switch strings.ToUpper(logLevel) {
+	case "TRACE":
+		level = LevelTrace
+	case "DEBUG":
+		level = slog.LevelDebug
+	case "INFO", "":
+		level = slog.LevelInfo
+	case "WARN":
+		level = slog.LevelWarn
+	case "ERROR":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+
+	// Create a custom handler that properly formats the TRACE level
+	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: level,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.LevelKey {
+				level := a.Value.Any().(slog.Level)
+				if level == LevelTrace {
+					a.Value = slog.StringValue("TRACE")
+				}
+			}
+			return a
+		},
+	})
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
+
 	sandboxSecret := os.Getenv("SANDBOX_SECRET")
 	if sandboxSecret == "" {
-		log.Fatal("SANDBOX_SECRET environment variable not set")
+		slog.Error("SANDBOX_SECRET environment variable not set")
+		os.Exit(1)
 	}
 
 	port := os.Getenv("PORT")
@@ -37,18 +79,20 @@ func main() {
 		Handler: mux,
 	}
 
-	log.Printf("Starting sandbox-executor on port %s", port)
+	slog.Info("Starting sandbox-executor", "version", Version, "port", port)
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP server failed: %v", err)
+			slog.Error("HTTP server failed", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	// Start the TCP proxy server on user port
-	log.Printf("Starting TCP proxy on port %s", proxyPort)
+	slog.Info("Starting TCP proxy", "port", proxyPort)
 	go func() {
 		if err := srv.StartTCPProxy(proxyPort); err != nil {
-			log.Fatalf("TCP proxy failed to start: %v", err)
+			slog.Error("TCP proxy failed to start", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -56,15 +100,15 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Println("Shutting down servers...")
+	slog.Info("Shutting down servers...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := httpServer.Shutdown(ctx); err != nil {
-		log.Printf("HTTP server shutdown error: %v", err)
+		slog.Error("HTTP server shutdown error", "error", err)
 	}
 
 	srv.StopTCPProxy()
-	log.Println("Servers stopped")
-	}
+	slog.Info("Servers stopped")
+}
