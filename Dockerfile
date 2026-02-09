@@ -11,7 +11,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w
 # run stage
 FROM ubuntu:22.04
 
-ENV GO_VERSION=1.22.11 \
+ENV GO_VERSION=1.25 \
     DENO_INSTALL=/usr/local \
     CARGO_HOME=/root/.cargo \
     RUSTUP_HOME=/root/.rustup \
@@ -41,11 +41,17 @@ RUN set -eux; apt-get update && apt-get install -y \
     ruby-full \
     erlang \
     elixir \
-    openjdk-17-jre-headless \
+    openjdk-17-jdk-headless \
     && curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
     && apt-get update \
     && apt-get install -y nodejs \
-    && curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz | tar -C /usr/local -xzf - \
+    && GO_ARCH="$(dpkg --print-architecture)" \
+    && case "$GO_ARCH" in \
+         amd64) GO_ARCH=amd64 ;; \
+         arm64) GO_ARCH=arm64 ;; \
+         *) echo "Unsupported architecture for Go: $GO_ARCH" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" | tar -C /usr/local -xzf - \
     && curl -fsSL https://sh.rustup.rs | bash -s -- -y --profile minimal \
     && curl -fsSL https://bun.sh/install | bash \
     && curl -fsSL https://deno.land/install.sh | sh \
