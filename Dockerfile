@@ -76,7 +76,7 @@ COPY --from=builder /app/sandbox-executor /usr/bin/sandbox-executor
 # Elixir: https://github.com/elixir-lang/elixir/blob/main/LICENSE (Apache 2.0)
 # Erlang: https://github.com/erlang/otp/blob/master/LICENSE.txt (Apache 2.0)
 # JDK: https://github.com/openjdk/jdk/blob/master/LICENSE (GNU GPL v2.0)
-# Ruby: https://github.com/ruby/ruby?tab=License-1-ov-file (copyright free)
+# Ruby: https://github.com/ruby/ruby?tab=License-1-ov-file (Ruby License / BSD-2-Clause)
 
 # Anthropic: https://www.anthropic.com/legal/commercial-terms (Commercial Terms of Service)
 # Cursor: https://cursor.com/terms-of-service (Commercial Terms of Service)
