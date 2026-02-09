@@ -66,7 +66,7 @@ RUN set -eux; apt-get update && apt-get install -y \
 
 COPY --from=builder /app/sandbox-executor /usr/bin/sandbox-executor
 
-COPY LICENSE LICENSE-* /licenses/
+COPY LICENSE licenses/LICENSE-* /licenses/
 
 
 # The entrypoint and mounting latest version of the executor is directly managed by koyeb platform
