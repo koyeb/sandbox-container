@@ -4,7 +4,7 @@ A secure sandbox container environment for executing commands and managing files
 
 ## Overview
 
-`sandbox-container` is built with Go and packaged as a Docker container based on Ubuntu 22.04. It includes common utilities like `curl`, `wget`, `git`, `python3`, and `jq`, making it suitable for various automation and testing scenarios.
+`sandbox-container` is built with Go and packaged as a Docker container based on Ubuntu 22.04. The image includes system utilities (curl, wget, git, jq, zip/unzip, file, procps, ca-certificates), language runtimes/toolchains (Node.js, Python, Go, Ruby, Rust, Elixir/Erlang, Java, Bun, Deno), and AI tooling (Copilot, Mistral Vibe, Claude, OpenCode, OpenAI Codex, Gemini, and Cursor). This makes it suitable for automation, testing, and code generation workflows.
 
 ## Features
 
