@@ -11,7 +11,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w
 # run stage
 FROM ubuntu:22.04
 
-ENV GO_VERSION=1.25 \
+ENV GO_VERSION=1.25.0 \
     DENO_INSTALL=/usr/local \
     CARGO_HOME=/root/.cargo \
     RUSTUP_HOME=/root/.rustup \
@@ -66,6 +66,8 @@ RUN set -eux; apt-get update && apt-get install -y \
 
 COPY --from=builder /app/sandbox-executor /usr/bin/sandbox-executor
 
+COPY LICENSE LICENSE-* /licenses/
+
 
 # The entrypoint and mounting latest version of the executor is directly managed by koyeb platform
 # to develop on the sandbox-executor, you can uncomment the following line and use koyeb-sdk with your custom image
@@ -78,7 +80,6 @@ COPY --from=builder /app/sandbox-executor /usr/bin/sandbox-executor
 # OpenCode: https://github.com/anomalyco/opencode/blob/dev/LICENSE (MIT)
 # Deno: https://github.com/denoland/deno/blob/main/LICENSE.md (MIT)
 # Bun: https://github.com/oven-sh/bun/blob/main/LICENSE.md (MIT)
-
 # Elixir: https://github.com/elixir-lang/elixir/blob/main/LICENSE (Apache 2.0)
 # Erlang: https://github.com/erlang/otp/blob/master/LICENSE.txt (Apache 2.0)
 # JDK: https://github.com/openjdk/jdk/blob/master/LICENSE (GNU GPL v2.0)
