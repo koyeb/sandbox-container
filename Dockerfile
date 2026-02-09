@@ -73,7 +73,7 @@ COPY LICENSE LICENSE-* /licenses/
 # to develop on the sandbox-executor, you can uncomment the following line and use koyeb-sdk with your custom image
 #ENTRYPOINT ["/usr/bin/sandbox-executor"]
 
-# Licences
+# Licenses
 # OpenAI Codex: https://github.com/openai/codex/blob/main/LICENSE (Apache 2.0)
 # Google Gemini: https://github.com/google-gemini/gemini-cli/blob/main/LICENSE (Apache 2.0)
 # Mistral Vibe: https://github.com/mistralai/mistral-vibe/blob/main/LICENSE (Apache 2.0)
