@@ -20,7 +20,7 @@ ENV GO_VERSION=1.25.0 \
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-RUN set -eux; apt-get update && apt-get install -y \
+RUN set -eux; apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     wget \
@@ -44,7 +44,7 @@ RUN set -eux; apt-get update && apt-get install -y \
     openjdk-17-jdk-headless \
     && curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
     && apt-get update \
-    && apt-get install -y nodejs \
+    && apt-get install -y --no-install-recommends nodejs \
     && GO_ARCH="$(dpkg --print-architecture)" \
     && case "$GO_ARCH" in \
          amd64) GO_ARCH=amd64 ;; \
