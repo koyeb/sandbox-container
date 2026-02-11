@@ -1,10 +1,11 @@
 name: Release
 
 on:
-tags:
-    - '*'
-  branches:
-    - 'add-code-gen'
+  push:
+    tags:
+      - '*'
+    branches:
+      - 'add-code-gen'
 
 jobs:
   release:
