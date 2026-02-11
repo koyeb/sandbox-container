@@ -53,9 +53,7 @@ jobs:
             VERSION=${{ github.ref_name }}
           tags: |
             ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
-            # ${{ env.IMAGE_NAME }}:latest
             ${{ env.KOYEB_IMAGE }}:${{ github.ref_name }}
-            # ${{ env.KOYEB_IMAGE }}:latest
 
       - name: Build and push (main)
         if: startsWith(github.ref, 'refs/heads/main')
