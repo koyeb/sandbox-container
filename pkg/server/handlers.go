@@ -444,7 +444,11 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	// Stream stderr
 	wg.Go(func() { streamOutput(stderr, "stderr") })
 
-	// Wait for command to finish
+	// Wait for both stdout and stderr goroutines to drain the pipes before calling
+	// cmd.Wait(), which closes the pipe read-ends and would lose buffered data.
+	wg.Wait()
+
+	// Reap the process and get the exit code.
 	err = cmd.Wait()
 	exitCode := 0
 	if cmd.ProcessState != nil {
@@ -452,9 +456,6 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Debug("Streaming command completed", "cmd", req.Cmd, "exit_code", exitCode)
-
-	// Wait for both stdout and stderr goroutines to finish processing all output
-	wg.Wait()
 
 	// Send completion event
 	completeData, _ := json.Marshal(map[string]interface{}{
