@@ -137,4 +137,41 @@ else
 fi
 echo
 
+echo "14. Large input via /run — sends a 100KB env var and verifies its length in the sandbox"
+INPUT_SIZE=102400  # 100KB
+LARGE_VAR=$(head -c "$INPUT_SIZE" /dev/zero | tr '\0' 'a')
+RESPONSE=$(jq -n --arg val "$LARGE_VAR" '{"cmd": "echo ${#LARGE_VAR}", "env": {"LARGE_VAR": $val}}' \
+  | curl -s -X POST "$BASE_URL/run" \
+    -H "Authorization: Bearer $SANDBOX_SECRET" \
+    -H "Content-Type: application/json" \
+    -d @-)
+REPORTED=$(echo "$RESPONSE" | jq -r '.stdout' | tr -d '[:space:]')
+if [ "$REPORTED" -eq "$INPUT_SIZE" ]; then
+  echo "OK: sandbox received env var of $REPORTED bytes"
+else
+  echo "FAIL: expected $INPUT_SIZE bytes, sandbox reported $REPORTED"
+  exit 1
+fi
+echo
+
+echo "15. Large input via /run_streaming — same 100KB env var over the streaming endpoint"
+TMPFILE=$(mktemp)
+jq -n --arg val "$LARGE_VAR" '{"cmd": "echo ${#LARGE_VAR}", "env": {"LARGE_VAR": $val}}' \
+  | curl -s -X POST "$BASE_URL/run_streaming" \
+    -H "Authorization: Bearer $SANDBOX_SECRET" \
+    -H "Content-Type: application/json" \
+    -d @- > "$TMPFILE"
+REPORTED=$(grep '^data: ' "$TMPFILE" \
+  | sed 's/^data: //' \
+  | jq -r 'select(.stream == "stdout") | .data' \
+  | tr -d '[:space:]')
+rm "$TMPFILE"
+if [ "$REPORTED" -eq "$INPUT_SIZE" ]; then
+  echo "OK: sandbox received env var of $REPORTED bytes"
+else
+  echo "FAIL: expected $INPUT_SIZE bytes, sandbox reported $REPORTED"
+  exit 1
+fi
+echo
+
 echo "=== Tests Complete ==="
