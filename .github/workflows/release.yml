@@ -3,9 +3,9 @@ name: Release
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - "v*.*.*"
     branches:
-      - 'main'
+      - "main"
 
 jobs:
   release:
@@ -21,7 +21,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
+          go-version-file: "go.mod"
 
       - name: Test
         run: make test
@@ -42,11 +42,12 @@ jobs:
           username: ${{ secrets.KOYEB_REGISTRY_USERNAME }}
           password: ${{ secrets.KOYEB_REGISTRY_PASSWORD }}
 
-      - name: Build and push (tagged release)
+      - name: Build and push full sandbox (tagged release)
         if: startsWith(github.ref, 'refs/tags/')
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile
           platforms: linux/amd64
           push: true
           build-args: |
@@ -57,11 +58,12 @@ jobs:
             ${{ env.KOYEB_IMAGE }}:${{ github.ref_name }}
             ${{ env.KOYEB_IMAGE }}:latest
 
-      - name: Build and push (main)
+      - name: Build and push full sandbox (main)
         if: startsWith(github.ref, 'refs/heads/main')
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile
           platforms: linux/amd64
           push: true
           build-args: |
@@ -71,6 +73,38 @@ jobs:
             ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
             ${{ env.KOYEB_IMAGE }}:main
             ${{ env.KOYEB_IMAGE }}:sha-${{ github.sha }}
+
+      - name: Build and push sandbox executor (tagged release)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.scratch
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          tags: |
+            ${{ env.IMAGE_NAME }}-executor:${{ github.ref_name }}
+            ${{ env.IMAGE_NAME }}-executor:latest
+            ${{ env.KOYEB_IMAGE }}-executor:${{ github.ref_name }}
+            ${{ env.KOYEB_IMAGE }}-executor:latest
+
+      - name: Build and push sandbox executor (main)
+        if: startsWith(github.ref, 'refs/heads/main')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.scratch
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            VERSION=${{ github.sha }}
+          tags: |
+            ${{ env.IMAGE_NAME }}-executor:main
+            ${{ env.IMAGE_NAME }}-executor:sha-${{ github.sha }}
+            ${{ env.KOYEB_IMAGE }}-executor:main
+            ${{ env.KOYEB_IMAGE }}-executor:sha-${{ github.sha }}
 
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/')
