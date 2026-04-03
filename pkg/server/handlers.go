@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/koyeb/sandbox-container/pkg/logger"
@@ -420,13 +422,17 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	// WaitGroup to track completion of both stdout and stderr goroutines
 	var wg sync.WaitGroup
 
+	// streamOutput emits one SSE output event per line, matching the documented
+	// behaviour. bufio.Reader.ReadString reads complete lines of any length without
+	// a hard token limit and never splits a multi-byte UTF-8 sequence across events.
 	streamOutput := func(r io.Reader, stream string) {
-		buf := make([]byte, 32*1024)
+		reader := bufio.NewReader(r)
 		for {
-			n, err := r.Read(buf)
-			if n > 0 {
-				slog.Debug("Command output", "cmd", req.Cmd, "stream", stream, "bytes", n)
-				data, _ := json.Marshal(map[string]string{"stream": stream, "data": string(buf[:n])})
+			line, err := reader.ReadString('\n')
+			if len(line) > 0 {
+				line = strings.TrimRight(line, "\r\n")
+				slog.Debug("Command output", "cmd", req.Cmd, "stream", stream, "line", line)
+				data, _ := json.Marshal(map[string]string{"stream": stream, "data": line})
 				writer.writeEvent("output", string(data))
 			}
 			if err != nil {
