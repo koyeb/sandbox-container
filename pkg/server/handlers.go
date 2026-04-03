@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -421,33 +420,29 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	// WaitGroup to track completion of both stdout and stderr goroutines
 	var wg sync.WaitGroup
 
+	streamOutput := func(r io.Reader, stream string) {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				slog.Debug("Command output", "cmd", req.Cmd, "stream", stream, "bytes", n)
+				data, _ := json.Marshal(map[string]string{"stream": stream, "data": string(buf[:n])})
+				writer.writeEvent("output", string(data))
+			}
+			if err != nil {
+				if err != io.EOF {
+					slog.Debug("read error", "stream", stream, "error", err)
+				}
+				return
+			}
+		}
+	}
+
 	// Stream stdout
-	wg.Go(func() {
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			line := scanner.Text()
-			slog.Debug("Command stdout", "cmd", req.Cmd, "line", line)
-			data, _ := json.Marshal(map[string]string{"stream": "stdout", "data": line})
-			writer.writeEvent("output", string(data))
-		}
-		if scanErr := scanner.Err(); scanErr != nil {
-			slog.Debug("stdout scanner error", "error", scanErr.Error())
-		}
-	})
+	wg.Go(func() { streamOutput(stdout, "stdout") })
 
 	// Stream stderr
-	wg.Go(func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			line := scanner.Text()
-			slog.Debug("Command stderr", "cmd", req.Cmd, "line", line)
-			data, _ := json.Marshal(map[string]string{"stream": "stderr", "data": line})
-			writer.writeEvent("output", string(data))
-		}
-		if scanErr := scanner.Err(); scanErr != nil {
-			slog.Debug("stderr scanner error", "error", scanErr.Error())
-		}
-	})
+	wg.Go(func() { streamOutput(stderr, "stderr") })
 
 	// Wait for command to finish
 	err = cmd.Wait()
