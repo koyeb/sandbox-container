@@ -1,6 +1,7 @@
 #!/bin/bash
 # Example test script for process management API
 # Make sure to set SANDBOX_SECRET environment variable before running
+set -euo pipefail
 
 if [ -z "$SANDBOX_SECRET" ]; then
     echo "Error: SANDBOX_SECRET environment variable not set"

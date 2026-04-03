@@ -1,6 +1,7 @@
 #!/bin/bash
 # Example test script for the exec (/run) and exec streaming (/run_streaming) APIs.
 # Make sure to set SANDBOX_SECRET environment variable before running.
+set -euo pipefail
 
 if [ -z "$SANDBOX_SECRET" ]; then
     echo "Error: SANDBOX_SECRET environment variable not set"
