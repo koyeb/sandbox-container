@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/koyeb/sandbox-container/pkg/logger"
@@ -421,35 +422,39 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	// WaitGroup to track completion of both stdout and stderr goroutines
 	var wg sync.WaitGroup
 
+	// streamOutput emits one SSE output event per line, matching the documented
+	// behaviour. bufio.Reader.ReadString reads complete lines of any length without
+	// a hard token limit and never splits a multi-byte UTF-8 sequence across events.
+	streamOutput := func(r io.Reader, stream string) {
+		reader := bufio.NewReader(r)
+		for {
+			line, err := reader.ReadString('\n')
+			if len(line) > 0 {
+				line = strings.TrimRight(line, "\r\n")
+				slog.Debug("Command output", "cmd", req.Cmd, "stream", stream, "line", line)
+				data, _ := json.Marshal(map[string]string{"stream": stream, "data": line})
+				writer.writeEvent("output", string(data))
+			}
+			if err != nil {
+				if err != io.EOF {
+					slog.Debug("read error", "stream", stream, "error", err)
+				}
+				return
+			}
+		}
+	}
+
 	// Stream stdout
-	wg.Go(func() {
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			line := scanner.Text()
-			slog.Debug("Command stdout", "cmd", req.Cmd, "line", line)
-			data, _ := json.Marshal(map[string]string{"stream": "stdout", "data": line})
-			writer.writeEvent("output", string(data))
-		}
-		if scanErr := scanner.Err(); scanErr != nil {
-			slog.Debug("stdout scanner error", "error", scanErr.Error())
-		}
-	})
+	wg.Go(func() { streamOutput(stdout, "stdout") })
 
 	// Stream stderr
-	wg.Go(func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			line := scanner.Text()
-			slog.Debug("Command stderr", "cmd", req.Cmd, "line", line)
-			data, _ := json.Marshal(map[string]string{"stream": "stderr", "data": line})
-			writer.writeEvent("output", string(data))
-		}
-		if scanErr := scanner.Err(); scanErr != nil {
-			slog.Debug("stderr scanner error", "error", scanErr.Error())
-		}
-	})
+	wg.Go(func() { streamOutput(stderr, "stderr") })
 
-	// Wait for command to finish
+	// Wait for both stdout and stderr goroutines to drain the pipes before calling
+	// cmd.Wait(), which closes the pipe read-ends and would lose buffered data.
+	wg.Wait()
+
+	// Reap the process and get the exit code.
 	err = cmd.Wait()
 	exitCode := 0
 	if cmd.ProcessState != nil {
@@ -457,9 +462,6 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Debug("Streaming command completed", "cmd", req.Cmd, "exit_code", exitCode)
-
-	// Wait for both stdout and stderr goroutines to finish processing all output
-	wg.Wait()
 
 	// Send completion event
 	completeData, _ := json.Marshal(map[string]interface{}{
