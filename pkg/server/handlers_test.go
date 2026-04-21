@@ -10,8 +10,17 @@ import (
 	"testing"
 )
 
-func newTestServer() (*Server, http.Handler) {
-	srv := New("test-secret")
+func newTestServer(t *testing.T) (*Server, http.Handler) {
+	t.Helper()
+
+	srv, err := New(AuthConfig{
+		Mode:   AuthModeStatic,
+		Secret: "test-secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create test server: %v", err)
+	}
+
 	return srv, srv.RegisterRoutes()
 }
 
@@ -25,7 +34,7 @@ func newAuthRequest(method, path string, body []byte) *http.Request {
 // TestRunHandlerLongOutput verifies that /run handles output lines with large payloads.
 // Uses a pipeline to generate large output without hitting ARG_MAX limits.
 func TestRunHandlerLongOutput(t *testing.T) {
-	_, mux := newTestServer()
+	_, mux := newTestServer(t)
 
 	const size = 1024 * 1024 * 10 // 10MB
 	reqBody, _ := json.Marshal(RunRequest{Cmd: fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'a'", size)})
@@ -51,7 +60,7 @@ func TestRunHandlerLongOutput(t *testing.T) {
 // without hanging. Before the fix, the bufio.Scanner would stop reading after 64KB,
 // fill the pipe buffer, and block cmd.Wait() indefinitely.
 func TestRunStreamingHandlerLongOutput(t *testing.T) {
-	_, mux := newTestServer()
+	_, mux := newTestServer(t)
 
 	const size = 1024 * 1024 * 10 // 10MB
 	reqBody, _ := json.Marshal(RunRequest{Cmd: fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'a'", size)})

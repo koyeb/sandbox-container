@@ -10,17 +10,22 @@ import (
 )
 
 type Server struct {
-	sandboxSecret  string
+	auth           *authState
 	tcpProxy       *TCPProxy
 	processManager *ProcessManager
 }
 
-func New(sandboxSecret string) *Server {
+func New(authConfig AuthConfig) (*Server, error) {
+	authState, err := newAuthState(authConfig)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Server{
-		sandboxSecret:  sandboxSecret,
+		auth:           authState,
 		tcpProxy:       NewTCPProxy(),
 		processManager: NewProcessManager(),
-	}
+	}, nil
 }
 
 func (s *Server) RegisterRoutes() *http.ServeMux {

@@ -50,6 +50,16 @@ All endpoints (except `/health`) require authentication via a bearer token passe
 Authorization: Bearer <sandbox-secret>
 ```
 
+The executor supports two authentication modes:
+
+- `SANDBOX_AUTH_MODE=static` (default): `SANDBOX_SECRET` must be set at startup
+- `SANDBOX_AUTH_MODE=pool`: the server first tries to load the secret from `SANDBOX_SECRET_PATH` (default: `/var/lib/sandbox-container/sandbox-secret`); if the file does not exist yet, the first authenticated request to any protected endpoint claims that bearer token and persists it for reuse after restart
+
+Notes:
+- `/health` remains unauthenticated and never bootstraps the pool secret
+- `SANDBOX_SECRET` must not be set when `SANDBOX_AUTH_MODE=pool`
+- The persisted secret file is written with `0600` permissions
+
 ## API Endpoints
 
 ### Health Check
@@ -968,6 +978,7 @@ Error responses include descriptive error messages in the response body.
 - Command execution uses `sh -c`, allowing shell features but also potential security risks
 - The server should be run in a properly isolated environment (container, VM, etc.)
 - The sandbox secret should be kept confidential and rotated regularly
+- In `pool` mode, mount persistent storage for `SANDBOX_SECRET_PATH` if the secret must survive container restarts
 - Consider implementing additional path restrictions to prevent access to sensitive directories
 
 ### Background Process Security
