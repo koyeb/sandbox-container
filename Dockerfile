@@ -16,7 +16,7 @@ ENV GO_VERSION=1.25.0 \
     CARGO_HOME=/root/.cargo \
     RUSTUP_HOME=/root/.rustup \
     BUN_INSTALL=/root/.bun \
-    PATH=/usr/local/go/bin:/usr/local/bin:/root/.bun/bin:/root/.cargo/bin:$PATH
+    PATH=/usr/local/go/bin:/usr/local/bin:/root/.bun/bin:/root/.cargo/bin:/root/.local/bin:$PATH
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
