@@ -29,9 +29,16 @@ A secure sandbox container environment for executing commands and managing files
 # Build and run the container
 make docker-run
 
-# Or manually with docker
+# Or manually with docker in static auth mode
 docker build -t koyeb/sandbox .
 docker run --rm -p 3030:3030 -p 3031:3031 -e SANDBOX_SECRET=your-secret-here koyeb/sandbox
+
+# Or run in pool auth mode with a persisted secret file
+docker run --rm -p 3030:3030 -p 3031:3031 \
+  -e SANDBOX_AUTH_MODE=pool \
+  -e SANDBOX_SECRET_PATH=/var/lib/sandbox-container/sandbox-secret \
+  -v sandbox-state:/var/lib/sandbox-container \
+  koyeb/sandbox
 ```
 
 ### Building from Source
@@ -40,17 +47,29 @@ docker run --rm -p 3030:3030 -p 3031:3031 -e SANDBOX_SECRET=your-secret-here koy
 # Build the binary
 make build
 
-# Run locally
+# Run locally in static auth mode
 SANDBOX_SECRET=your-secret-here PORT=3030 ./bin/sandbox-executor
+
+# Run locally in pool auth mode
+SANDBOX_AUTH_MODE=pool SANDBOX_SECRET_PATH=/tmp/sandbox-secret PORT=3030 ./bin/sandbox-executor
 ```
 
 ## Configuration
 
-The server requires the following environment variables:
+Authentication can run in one of two modes:
 
-- `SANDBOX_SECRET` (required): Authentication token for API endpoints
+- `SANDBOX_AUTH_MODE=static` (default): requires `SANDBOX_SECRET`
+- `SANDBOX_AUTH_MODE=pool`: loads `SANDBOX_SECRET_PATH` if it already exists; otherwise the first authenticated request claims the bearer token, persists it to disk, and later requests must reuse it
+
+Environment variables:
+
+- `SANDBOX_AUTH_MODE` (optional): `static` or `pool`, defaults to `static`
+- `SANDBOX_SECRET` (required in `static` mode): Authentication token for API endpoints
+- `SANDBOX_SECRET_PATH` (optional in `pool` mode): Secret file path, defaults to `/var/lib/sandbox-container/sandbox-secret`
 - `PORT` (optional): HTTP server port, defaults to `3030`
 - `PROXY_PORT` (optional): TCP proxy server port, defaults to `3031`
+
+In `pool` mode, do not set `SANDBOX_SECRET`; the server will reject that configuration.
 
 ## API Endpoints
 
@@ -59,6 +78,8 @@ The server requires the following environment variables:
 GET /health
 ```
 No authentication required.
+
+In `pool` mode, `/health` stays unauthenticated and does not initialize the stored secret.
 
 ### Run Command
 ```

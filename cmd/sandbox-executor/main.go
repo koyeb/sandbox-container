@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,6 +19,12 @@ var Version = "dev"
 
 // LevelTrace is a custom log level below DEBUG for very verbose logging
 const LevelTrace = slog.Level(-8)
+
+type runtimeConfig struct {
+	Port      string
+	ProxyPort string
+	Auth      server.AuthConfig
+}
 
 func main() {
 	// Configure logger based on LOG_LEVEL environment variable
@@ -54,32 +61,26 @@ func main() {
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 
-	sandboxSecret := os.Getenv("SANDBOX_SECRET")
-	if sandboxSecret == "" {
-		slog.Error("SANDBOX_SECRET environment variable not set")
+	config, err := loadConfigFromEnv()
+	if err != nil {
+		slog.Error(err.Error())
 		os.Exit(1)
 	}
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "3030"
+	srv, err := server.New(config.Auth)
+	if err != nil {
+		slog.Error("Failed to initialize server", "error", err)
+		os.Exit(1)
 	}
-
-	proxyPort := os.Getenv("PROXY_PORT")
-	if proxyPort == "" {
-		proxyPort = "3031"
-	}
-
-	srv := server.New(sandboxSecret)
 	mux := srv.RegisterRoutes()
 
 	// Start the main HTTP server
 	httpServer := &http.Server{
-		Addr:    ":" + port,
+		Addr:    ":" + config.Port,
 		Handler: mux,
 	}
 
-	slog.Info("Starting sandbox-executor", "version", Version, "port", port)
+	slog.Info("Starting sandbox-executor", "version", Version, "port", config.Port, "auth_mode", config.Auth.Mode)
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("HTTP server failed", "error", err)
@@ -88,9 +89,9 @@ func main() {
 	}()
 
 	// Start the TCP proxy server on user port
-	slog.Info("Starting TCP proxy", "port", proxyPort)
+	slog.Info("Starting TCP proxy", "port", config.ProxyPort)
 	go func() {
-		if err := srv.StartTCPProxy(proxyPort); err != nil {
+		if err := srv.StartTCPProxy(config.ProxyPort); err != nil {
 			slog.Error("TCP proxy failed to start", "error", err)
 			os.Exit(1)
 		}
@@ -111,4 +112,46 @@ func main() {
 
 	srv.StopTCPProxy()
 	slog.Info("Servers stopped")
+}
+
+func loadConfigFromEnv() (runtimeConfig, error) {
+	config := runtimeConfig{
+		Port:      getenvDefault("PORT", "3030"),
+		ProxyPort: getenvDefault("PROXY_PORT", "3031"),
+		Auth: server.AuthConfig{
+			Mode:       server.AuthMode(strings.ToLower(os.Getenv("SANDBOX_AUTH_MODE"))),
+			Secret:     os.Getenv("SANDBOX_SECRET"),
+			SecretPath: os.Getenv("SANDBOX_SECRET_PATH"),
+		},
+	}
+
+	if config.Auth.Mode == "" {
+		config.Auth.Mode = server.AuthModeStatic
+	}
+
+	switch config.Auth.Mode {
+	case server.AuthModeStatic:
+		if config.Auth.Secret == "" {
+			return runtimeConfig{}, fmt.Errorf("SANDBOX_SECRET environment variable not set")
+		}
+	case server.AuthModePool:
+		if config.Auth.Secret != "" {
+			return runtimeConfig{}, fmt.Errorf("SANDBOX_SECRET cannot be set when SANDBOX_AUTH_MODE=pool")
+		}
+		if config.Auth.SecretPath == "" {
+			config.Auth.SecretPath = server.DefaultPoolSecretPath
+		}
+	default:
+		return runtimeConfig{}, fmt.Errorf("unsupported SANDBOX_AUTH_MODE %q", config.Auth.Mode)
+	}
+
+	return config, nil
+}
+
+func getenvDefault(key, fallback string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	return value
 }
