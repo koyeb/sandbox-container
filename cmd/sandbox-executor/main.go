@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -97,21 +98,59 @@ func main() {
 		}
 	}()
 
-	// Wait for interrupt signal for graceful shutdown
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	slog.Info("Shutting down servers...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := httpServer.Shutdown(ctx); err != nil {
-		slog.Error("HTTP server shutdown error", "error", err)
+	// If a customer command is provided after --, run it as a subprocess.
+	var customerCmd *exec.Cmd
+	if cmdArgs := extractCustomerCommand(os.Args); len(cmdArgs) > 0 {
+		slog.Info("Starting customer command", "args", cmdArgs)
+		customerCmd = exec.Command(cmdArgs[0], cmdArgs[1:]...)
+		customerCmd.Stdout = os.Stdout
+		customerCmd.Stderr = os.Stderr
+		customerCmd.Stdin = os.Stdin
+		if err := customerCmd.Start(); err != nil {
+			slog.Error("Failed to start customer command", "error", err)
+			os.Exit(1)
+		}
 	}
 
-	srv.StopTCPProxy()
-	slog.Info("Servers stopped")
+	// Wait for interrupt signal or customer command exit for graceful shutdown.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	if customerCmd != nil {
+		customerDone := make(chan int, 1)
+		go func() {
+			err := customerCmd.Wait()
+			exitCode := 0
+			if err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					exitCode = exitErr.ExitCode()
+				} else {
+					exitCode = 1
+				}
+			}
+			customerDone <- exitCode
+		}()
+
+		select {
+		case sig := <-quit:
+			slog.Info("Received signal, forwarding to customer command", "signal", sig)
+			customerCmd.Process.Signal(sig)
+			select {
+			case <-customerDone:
+			case <-time.After(5 * time.Second):
+				customerCmd.Process.Kill()
+			}
+		case exitCode := <-customerDone:
+			slog.Info("Customer command exited", "exit_code", exitCode)
+			shutdownServers(httpServer, srv)
+			os.Exit(exitCode)
+		}
+	} else {
+		<-quit
+	}
+
+	slog.Info("Shutting down servers...")
+	shutdownServers(httpServer, srv)
 }
 
 func loadConfigFromEnv() (runtimeConfig, error) {
@@ -154,4 +193,26 @@ func getenvDefault(key, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+// extractCustomerCommand returns the arguments after "--" in args, or nil if
+// no "--" separator is found.
+func extractCustomerCommand(args []string) []string {
+	for i, arg := range args {
+		if arg == "--" {
+			return args[i+1:]
+		}
+	}
+	return nil
+}
+
+func shutdownServers(httpServer *http.Server, srv *server.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := httpServer.Shutdown(ctx); err != nil {
+		slog.Error("HTTP server shutdown error", "error", err)
+	}
+	srv.StopTCPProxy()
+	slog.Info("Servers stopped")
 }
