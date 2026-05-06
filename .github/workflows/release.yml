@@ -89,6 +89,10 @@ jobs:
             ${{ env.IMAGE_NAME }}-executor:latest
             ${{ env.KOYEB_IMAGE }}-executor:${{ github.ref_name }}
             ${{ env.KOYEB_IMAGE }}-executor:latest
+            ${{ env.IMAGE_NAME }}:slim
+            ${{ env.IMAGE_NAME }}:${{ github.ref_name }}-slim
+            ${{ env.KOYEB_IMAGE }}:slim
+            ${{ env.KOYEB_IMAGE }}:${{ github.ref_name }}-slim
 
       - name: Build and push sandbox executor (main)
         if: startsWith(github.ref, 'refs/heads/main')
@@ -105,6 +109,10 @@ jobs:
             ${{ env.IMAGE_NAME }}-executor:sha-${{ github.sha }}
             ${{ env.KOYEB_IMAGE }}-executor:main
             ${{ env.KOYEB_IMAGE }}-executor:sha-${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:slim
+            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}-slim
+            ${{ env.KOYEB_IMAGE }}:slim
+            ${{ env.KOYEB_IMAGE }}:sha-${{ github.sha }}-slim
 
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/')

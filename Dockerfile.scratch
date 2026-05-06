@@ -13,7 +13,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w -X main.Version=${VERSION}" -o sandbox-executor ./cmd/sandbox-executor
 
 
-FROM alpine:latest
+FROM ubuntu:22.04
 
 COPY --from=builder /app/sandbox-executor /usr/bin/sandbox-executor
 
