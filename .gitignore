@@ -7,8 +7,8 @@
 *.dll
 *.so
 *.dylib
-bin
-sandbox-executor
+/bin
+/sandbox-executor
 
 # Test binary, built with `go test -c`
 *.test
