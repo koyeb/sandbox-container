@@ -15,6 +15,11 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w
 
 FROM ubuntu:22.04
 
+RUN set -eux; apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /app/sandbox-executor /usr/bin/sandbox-executor
 
 # The entrypoint and mounting latest version of the executor is directly managed by koyeb platform
