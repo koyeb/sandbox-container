@@ -1,4 +1,4 @@
-.PHONY: build clean run test docker-build docker-run docker-buildx
+.PHONY: build clean run test docker-build docker-build-dind docker-run docker-buildx docker-push docker-push-dind
 
 BINARY_NAME=sandbox-executor
 BUILD_DIR=bin
@@ -35,9 +35,17 @@ docker-buildx:
 	@echo "Building Docker image $(DOCKER_IMAGE) for multiple platforms..."
 	docker buildx build --platform linux/amd64,linux/arm64 --build-arg VERSION=$(VERSION) -t $(DOCKER_IMAGE) .
 
+docker-build-dind:
+	@echo "Building Docker image $(DOCKER_IMAGE):dind for $(PLATFORM)..."
+	docker buildx build --platform $(PLATFORM) --build-arg VERSION=$(VERSION) -t $(DOCKER_IMAGE):dind -f Dockerfile.dind .
+
 docker-push:
 	@echo "Building and pushing Docker image $(DOCKER_IMAGE) for multiple platforms..."
 	docker buildx build --platform linux/amd64,linux/arm64 --build-arg VERSION=$(VERSION) -t $(DOCKER_IMAGE) --push .
+
+docker-push-dind:
+	@echo "Building and pushing Docker image $(DOCKER_IMAGE):dind for multiple platforms..."
+	docker buildx build --platform linux/amd64 --build-arg VERSION=$(VERSION) -t $(DOCKER_IMAGE):dind -f Dockerfile.dind --push .
 
 docker-run: docker-build
 	@echo "Running Docker container..."
