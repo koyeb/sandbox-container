@@ -83,3 +83,51 @@ func TestRunStreamingHandlerLongOutput(t *testing.T) {
 		t.Errorf("expected %d bytes of stdout data in SSE stream, got %d", size, total)
 	}
 }
+
+func TestStartProcessInvalidCwd(t *testing.T) {
+	_, mux := newTestServer(t)
+
+	reqBody, _ := json.Marshal(map[string]string{
+		"cmd": "id",
+		"cwd": "/invalid/path",
+	})
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/start_process", reqBody))
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRunInvalidCwd(t *testing.T) {
+	_, mux := newTestServer(t)
+
+	reqBody, _ := json.Marshal(map[string]string{
+		"cmd": "id",
+		"cwd": "/invalid/path",
+	})
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/run", reqBody))
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRunStreamingInvalidCwd(t *testing.T) {
+	_, mux := newTestServer(t)
+
+	reqBody, _ := json.Marshal(map[string]string{
+		"cmd": "id",
+		"cwd": "/invalid/path",
+	})
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/run_streaming", reqBody))
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request, got %d: %s", w.Code, w.Body.String())
+	}
+}
