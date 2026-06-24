@@ -111,6 +111,13 @@ func (s *Server) runHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Cwd != "" {
+		if info, err := os.Stat(req.Cwd); err != nil || !info.IsDir() {
+			http.Error(w, fmt.Sprintf("Invalid working directory: %s", req.Cwd), http.StatusBadRequest)
+			return
+		}
+	}
+
 	slog.Debug("Executing command", "cmd", req.Cmd, "cwd", req.Cwd, "env", req.Env)
 
 	cmd := exec.Command("sh", "-c", req.Cmd)
@@ -198,6 +205,13 @@ func (s *Server) startProcessHandler(w http.ResponseWriter, r *http.Request) {
 	if req.Cmd == "" {
 		http.Error(w, "Command is required", http.StatusBadRequest)
 		return
+	}
+
+	if req.Cwd != "" {
+		if info, err := os.Stat(req.Cwd); err != nil || !info.IsDir() {
+			http.Error(w, fmt.Sprintf("Invalid working directory: %s", req.Cwd), http.StatusBadRequest)
+			return
+		}
 	}
 
 	slog.Debug("Start process request", "cmd", req.Cmd, "cwd", req.Cwd, "env", req.Env)
@@ -364,6 +378,13 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
+	}
+
+	if req.Cwd != "" {
+		if info, err := os.Stat(req.Cwd); err != nil || !info.IsDir() {
+			http.Error(w, fmt.Sprintf("Invalid working directory: %s", req.Cwd), http.StatusBadRequest)
+			return
+		}
 	}
 
 	slog.Debug("Executing streaming command", "cmd", req.Cmd, "cwd", req.Cwd, "env", req.Env)
