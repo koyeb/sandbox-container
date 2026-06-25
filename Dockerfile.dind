@@ -22,7 +22,9 @@ RUN apt-get update && \
     python3 \
     python3-pip \
     iproute2 \
-    iptables && \
+    iptables \
+    pigz \
+    fuse-overlayfs && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Docker
@@ -46,9 +48,7 @@ RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings
 RUN curl -fsSL "https://github.com/opencontainers/runc/releases/download/v${RUNC_VERSION}/runc.$(dpkg --print-architecture)" -o /usr/bin/runc && \
     chmod +x /usr/bin/runc
 
-ADD https://raw.githubusercontent.com/google/gvisor/master/images/basic/docker/start-dockerd.sh /usr/bin/start-dockerd.sh
-RUN chmod +x /usr/bin/start-dockerd.sh
-
 COPY --from=builder /app/sandbox-executor /usr/bin/sandbox-executor-bin
-COPY sandbox-executor-dind.sh /usr/bin/sandbox-executor
-RUN chmod +x /usr/bin/sandbox-executor
+COPY scripts/start-dockerd.sh /usr/bin/start-dockerd.sh
+COPY scripts/sandbox-executor-dind.sh /usr/bin/sandbox-executor
+RUN chmod +x /usr/bin/start-dockerd.sh /usr/bin/sandbox-executor
