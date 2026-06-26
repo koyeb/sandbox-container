@@ -12,11 +12,9 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w
 FROM ubuntu:22.04
 
 ENV GO_VERSION=1.25.0 \
-    DENO_INSTALL=/usr/local \
     CARGO_HOME=/root/.cargo \
     RUSTUP_HOME=/root/.rustup \
-    BUN_INSTALL=/root/.bun \
-    PATH=/usr/local/go/bin:/usr/local/bin:/root/.bun/bin:/root/.cargo/bin:/root/.local/bin:$PATH
+    PATH=/usr/local/go/bin:/usr/local/bin:/root/.cargo/bin:/root/.local/bin:$PATH
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
