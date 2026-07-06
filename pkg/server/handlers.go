@@ -12,15 +12,17 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/koyeb/sandbox-container/pkg/logger"
 )
 
 // sseWriter provides thread-safe writing for Server-Sent Events
 type sseWriter struct {
-	w       http.ResponseWriter
-	mu      sync.Mutex
-	flusher http.Flusher
+	w        http.ResponseWriter
+	mu       sync.Mutex
+	flusher  http.Flusher
+	activity chan struct{}
 }
 
 func newSSEWriter(w http.ResponseWriter) (*sseWriter, error) {
@@ -29,9 +31,28 @@ func newSSEWriter(w http.ResponseWriter) (*sseWriter, error) {
 		return nil, fmt.Errorf("streaming unsupported")
 	}
 	return &sseWriter{
-		w:       w,
-		flusher: flusher,
+		w:        w,
+		flusher:  flusher,
+		activity: make(chan struct{}, 1),
 	}, nil
+}
+
+func (s *sseWriter) startKeepalive(ctx context.Context) {
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(15 * time.Second):
+				s.mu.Lock()
+				slog.Debug("Sending SSE keepalive")
+				fmt.Fprintf(s.w, ":keepalive\n\n")
+				s.flusher.Flush()
+				s.mu.Unlock()
+			case <-s.activity:
+			}
+		}
+	}()
 }
 
 func (s *sseWriter) writeEvent(event, data string) {
@@ -39,6 +60,10 @@ func (s *sseWriter) writeEvent(event, data string) {
 	defer s.mu.Unlock()
 	fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, data)
 	s.flusher.Flush()
+	select {
+	case s.activity <- struct{}{}:
+	default:
+	}
 }
 
 func (s *sseWriter) writeEventf(event, format string, args ...interface{}) {
@@ -48,6 +73,10 @@ func (s *sseWriter) writeEventf(event, format string, args ...interface{}) {
 	fmt.Fprintf(s.w, format, args...)
 	fmt.Fprintf(s.w, "\n\n")
 	s.flusher.Flush()
+	select {
+	case s.activity <- struct{}{}:
+	default:
+	}
 }
 
 type RunRequest struct {
@@ -357,6 +386,7 @@ func (s *Server) processLogsStreamingHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	writer.startKeepalive(r.Context())
 	slog.Debug("Started streaming process logs", "id", processID)
 
 	// Stream logs as they arrive
@@ -401,9 +431,10 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create context for goroutine lifecycle management
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+
+	writer.startKeepalive(ctx)
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", req.Cmd)
 
