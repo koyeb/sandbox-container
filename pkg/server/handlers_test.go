@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestServer(t *testing.T) (*Server, http.Handler) {
@@ -81,6 +82,66 @@ func TestRunStreamingHandlerLongOutput(t *testing.T) {
 	}
 	if total != size {
 		t.Errorf("expected %d bytes of stdout data in SSE stream, got %d", size, total)
+	}
+}
+
+func TestRunStreamingHandlerCarriageReturnProgress(t *testing.T) {
+	_, mux := newTestServer(t)
+
+	reqBody, _ := json.Marshal(RunRequest{Cmd: "printf 'Cloning into repo...\\rReceiving objects: 10%%\\rReceiving objects: 100%%\\n' >&2"})
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/run_streaming", reqBody))
+
+	want := []string{
+		"Cloning into repo...",
+		"Receiving objects: 10%",
+		"Receiving objects: 100%",
+	}
+	got := make([]string, 0, len(want))
+	for _, line := range strings.Split(w.Body.String(), "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var event map[string]string
+		if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event) == nil && event["stream"] == "stderr" {
+			got = append(got, event["data"])
+		}
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("expected stderr events %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stderr event %d: expected %q, got %q", i, want[i], got[i])
+		}
+	}
+}
+
+func TestRunStreamingHandlerCompletesWhenDescendantKeepsPipeOpen(t *testing.T) {
+	oldWaitDelay := streamingCommandWaitDelay
+	streamingCommandWaitDelay = 10 * time.Millisecond
+	t.Cleanup(func() { streamingCommandWaitDelay = oldWaitDelay })
+
+	_, mux := newTestServer(t)
+	reqBody, _ := json.Marshal(RunRequest{Cmd: "echo done; sleep 60 &"})
+
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/run_streaming", reqBody))
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("streaming handler did not complete after command exited")
+	}
+
+	if !strings.Contains(w.Body.String(), "done") {
+		t.Fatalf("expected streamed output to contain %q, got %q", "done", w.Body.String())
 	}
 }
 
