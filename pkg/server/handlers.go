@@ -43,7 +43,7 @@ func (s *sseWriter) startKeepalive(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(15 * time.Second):
+			case <-time.After(10 * time.Second):
 				s.mu.Lock()
 				slog.Debug("Sending SSE keepalive")
 				fmt.Fprintf(s.w, ":keepalive\n\n")
@@ -386,6 +386,7 @@ func (s *Server) processLogsStreamingHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	writer.flusher.Flush()
 	writer.startKeepalive(r.Context())
 	slog.Debug("Started streaming process logs", "id", processID)
 
@@ -434,6 +435,7 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	writer.flusher.Flush()
 	writer.startKeepalive(ctx)
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", req.Cmd)
