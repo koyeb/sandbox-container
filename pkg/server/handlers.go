@@ -1,17 +1,17 @@
 package server
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/koyeb/sandbox-container/pkg/logger"
@@ -91,6 +91,8 @@ type RunResponse struct {
 	Error  string `json:"error,omitempty"`
 	Code   int    `json:"code"`
 }
+
+var streamingCommandWaitDelay = 5 * time.Second
 
 type WriteFileRequest struct {
 	Path    string `json:"path"`
@@ -439,6 +441,17 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	writer.startKeepalive(ctx)
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", req.Cmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = streamingCommandWaitDelay
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+			return err
+		}
+		return nil
+	}
 
 	// Set working directory if provided
 	if req.Cwd != "" {
@@ -476,20 +489,45 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	// WaitGroup to track completion of both stdout and stderr goroutines
 	var wg sync.WaitGroup
 
-	// streamOutput emits one SSE output event per line, matching the documented
-	// behaviour. bufio.Reader.ReadString reads complete lines of any length without
-	// a hard token limit and never splits a multi-byte UTF-8 sequence across events.
 	streamOutput := func(r io.Reader, stream string) {
-		reader := bufio.NewReader(r)
+		line := make([]byte, 0, 32*1024)
+		emit := func() {
+			if len(line) == 0 {
+				return
+			}
+			dataLine := string(line)
+			line = line[:0]
+			slog.Debug("Command output", "cmd", req.Cmd, "stream", stream, "line", dataLine)
+			data, _ := json.Marshal(map[string]string{"stream": stream, "data": dataLine})
+			writer.writeEvent("output", string(data))
+		}
+		consume := func(chunk []byte) {
+			for len(chunk) > 0 {
+				idx := -1
+				for i, b := range chunk {
+					if b == '\r' || b == '\n' {
+						idx = i
+						break
+					}
+				}
+				if idx == -1 {
+					line = append(line, chunk...)
+					return
+				}
+				line = append(line, chunk[:idx]...)
+				emit()
+				chunk = chunk[idx+1:]
+			}
+		}
+
+		buf := make([]byte, 32*1024)
 		for {
-			line, err := reader.ReadString('\n')
-			if len(line) > 0 {
-				line = strings.TrimRight(line, "\r\n")
-				slog.Debug("Command output", "cmd", req.Cmd, "stream", stream, "line", line)
-				data, _ := json.Marshal(map[string]string{"stream": stream, "data": line})
-				writer.writeEvent("output", string(data))
+			n, err := r.Read(buf)
+			if n > 0 {
+				consume(buf[:n])
 			}
 			if err != nil {
+				emit()
 				if err != io.EOF {
 					slog.Debug("read error", "stream", stream, "error", err)
 				}
@@ -504,12 +542,18 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	// Stream stderr
 	wg.Go(func() { streamOutput(stderr, "stderr") })
 
-	// Wait for both stdout and stderr goroutines to drain the pipes before calling
-	// cmd.Wait(), which closes the pipe read-ends and would lose buffered data.
-	wg.Wait()
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
 
-	// Reap the process and get the exit code.
-	err = cmd.Wait()
+	wg.Wait()
+	err = <-waitDone
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.Process != nil {
+		if killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); killErr != nil && killErr != syscall.ESRCH {
+			slog.Debug("Failed to kill streaming command process group after wait delay", "cmd", req.Cmd, "error", killErr)
+		}
+	}
 	exitCode := 0
 	if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
