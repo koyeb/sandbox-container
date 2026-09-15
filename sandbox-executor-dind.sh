@@ -1,6 +1,10 @@
 #!/bin/sh
 set -e
 
+# Mount a tmpfs on /var/lib/docker for Kubernetes compatibility.
+mkdir -p /var/lib/docker
+mount -t tmpfs -o size=20G tmpfs /var/lib/docker
+
 # Start Docker daemon in the background using the dind entrypoint
 /usr/bin/start-dockerd.sh &
 

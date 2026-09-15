@@ -22,7 +22,8 @@ RUN apt-get update && \
     python3 \
     python3-pip \
     iproute2 \
-    iptables && \
+    iptables \
+    util-linux && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Docker
