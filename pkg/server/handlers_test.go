@@ -6,7 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -119,30 +124,145 @@ func TestRunStreamingHandlerCarriageReturnProgress(t *testing.T) {
 	}
 }
 
-func TestRunStreamingHandlerCompletesWhenDescendantKeepsPipeOpen(t *testing.T) {
+// streamingEvents runs cmd through /run_streaming and returns the data of its
+// output events for the given stream, and its complete event.
+func streamingEvents(t *testing.T, mux http.Handler, cmd, stream string) ([]string, map[string]any) {
+	t.Helper()
+
+	reqBody, _ := json.Marshal(RunRequest{Cmd: cmd})
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/run_streaming", reqBody))
+
+	var lines []string
+	var complete map[string]any
+	event := ""
+	for _, line := range strings.Split(w.Body.String(), "\n") {
+		if name, ok := strings.CutPrefix(line, "event: "); ok {
+			event = name
+			continue
+		}
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		switch event {
+		case "output":
+			var output map[string]string
+			if json.Unmarshal([]byte(data), &output) == nil && output["stream"] == stream {
+				lines = append(lines, output["data"])
+			}
+		case "complete":
+			if err := json.Unmarshal([]byte(data), &complete); err != nil {
+				t.Fatalf("failed to decode complete event %q: %v", data, err)
+			}
+		}
+	}
+	if complete == nil {
+		t.Fatalf("no complete event in %q", w.Body.String())
+	}
+	return lines, complete
+}
+
+// TestRunStreamingHandlerCompleteOutput verifies that no output is lost when the
+// command exits while output is still buffered in the pipe. Many short lines make the
+// handler (one SSE event per line) slower than the command.
+func TestRunStreamingHandlerCompleteOutput(t *testing.T) {
+	_, mux := newTestServer(t)
+
+	const n = 200000
+	lines, complete := streamingEvents(t, mux, fmt.Sprintf("seq 1 %d", n), "stdout")
+
+	if len(lines) != n {
+		t.Fatalf("expected %d stdout events, got %d (last %q)", n, len(lines), lines[len(lines)-1])
+	}
+	if last := lines[len(lines)-1]; last != strconv.Itoa(n) {
+		t.Fatalf("expected last stdout event %q, got %q", strconv.Itoa(n), last)
+	}
+	if complete["code"] != float64(0) || complete["error"] != false {
+		t.Fatalf("expected complete {code:0 error:false}, got %v", complete)
+	}
+}
+
+func TestRunStreamingHandlerBlankLines(t *testing.T) {
+	_, mux := newTestServer(t)
+
+	lines, _ := streamingEvents(t, mux, "printf 'a\\n\\nb\\r\\n\\r\\nc\\rd\\r\\re\\n'", "stdout")
+
+	want := []string{"a", "", "b", "", "c", "d", "e"}
+	if !slices.Equal(lines, want) {
+		t.Fatalf("expected stdout events %q, got %q", want, lines)
+	}
+}
+
+// TestRunStreamingHandlerKillsDescendantKeepingPipeOpen verifies that when a
+// background child still holds the output after the command exits, the stream ends
+// after the wait delay and the child is killed.
+func TestRunStreamingHandlerKillsDescendantKeepingPipeOpen(t *testing.T) {
+	const waitDelay = 500 * time.Millisecond
 	oldWaitDelay := streamingCommandWaitDelay
-	streamingCommandWaitDelay = 10 * time.Millisecond
+	streamingCommandWaitDelay = waitDelay
 	t.Cleanup(func() { streamingCommandWaitDelay = oldWaitDelay })
 
 	_, mux := newTestServer(t)
-	reqBody, _ := json.Marshal(RunRequest{Cmd: "echo done; sleep 60 &"})
+	pidFile := filepath.Join(t.TempDir(), "pid")
 
-	w := httptest.NewRecorder()
+	start := time.Now()
 	done := make(chan struct{})
+	var lines []string
+	var complete map[string]any
 	go func() {
 		defer close(done)
-		mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/run_streaming", reqBody))
+		lines, complete = streamingEvents(t, mux, fmt.Sprintf("echo done; sleep 60 & echo $! > %s", pidFile), "stdout")
 	}()
 
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("streaming handler did not complete after command exited")
 	}
+	elapsed := time.Since(start)
 
-	if !strings.Contains(w.Body.String(), "done") {
-		t.Fatalf("expected streamed output to contain %q, got %q", "done", w.Body.String())
+	if elapsed < waitDelay {
+		t.Fatalf("expected the stream to last at least the wait delay %s, ended after %s", waitDelay, elapsed)
 	}
+	if !slices.Equal(lines, []string{"done"}) {
+		t.Fatalf("expected stdout events [done], got %q", lines)
+	}
+	if complete["code"] != float64(0) || complete["error"] != false {
+		t.Fatalf("expected complete {code:0 error:false}, got %v", complete)
+	}
+
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("failed to read background pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatalf("invalid background pid %q: %v", pidBytes, err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for processRunning(pid) {
+		if time.Now().After(deadline) {
+			syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("background child %d still running after the stream ended", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// processRunning reports whether pid exists and is not a zombie (an orphan whose
+// reaper, e.g. PID 1 in a container, doesn't wait for it).
+func processRunning(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return false
+	}
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return true
+	}
+	// Format: pid (comm) state ...
+	fields := strings.Fields(string(stat[bytes.LastIndexByte(stat, ')')+1:]))
+	return len(fields) == 0 || fields[0] != "Z"
 }
 
 func TestStartProcessInvalidCwd(t *testing.T) {

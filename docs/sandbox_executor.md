@@ -224,7 +224,10 @@ data: {"code":0,"error":false}
 **Notes:**
 - stdout and stderr are streamed line-by-line as they are produced
 - Both streams are processed concurrently
-- The connection remains open until the command completes
+- A line ends at `\n`, `\r\n`, or `\r`: progress output redrawn in place with `\r` (e.g. `git clone --progress`) streams one `output` event per update. The line ending itself is not included in `data`
+- The connection remains open until the command completes and all of its output has been sent
+- Background processes started by the command (`server &`) must redirect their output (`server >/tmp/server.log 2>&1 &`), or be started with `/start_process`. A background process still holding stdout or stderr 5 seconds after the command exits is killed with SIGKILL, and the stream then completes with the command's exit code
+- If the client disconnects, the command and every process it started (its whole process group, including redirected background processes) are killed
 - For simple commands where buffered output is acceptable, use `/run` instead
 
 ---
