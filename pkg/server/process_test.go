@@ -5,6 +5,40 @@ import (
 	"time"
 )
 
+// waitForProcess waits for the process to exit and returns its final status,
+// read under the lock that waitForCompletion writes it with.
+func waitForProcess(t *testing.T, process *Process) ProcessStatus {
+	t.Helper()
+	select {
+	case <-process.done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("process %s did not exit", process.ID)
+	}
+	process.mu.RLock()
+	defer process.mu.RUnlock()
+	return process.Status
+}
+
+// waitForLogs polls the process logs until found returns true, since the output
+// goroutines may still be appending when the process exits.
+func waitForLogs(t *testing.T, pm *ProcessManager, id string, found func([]LogEntry) bool) bool {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		logs, err := pm.GetProcessLogs(id)
+		if err != nil {
+			t.Fatalf("Failed to get logs: %v", err)
+		}
+		if found(logs) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestProcessManager_StartProcess(t *testing.T) {
 	pm := NewProcessManager()
 
@@ -21,12 +55,9 @@ func TestProcessManager_StartProcess(t *testing.T) {
 		t.Error("Process PID should not be 0")
 	}
 
-	if process.Status != ProcessStatusRunning {
-		t.Errorf("Expected status Running, got %s", process.Status)
+	if status := waitForProcess(t, process); status != ProcessStatusCompleted {
+		t.Errorf("Expected status Completed, got %s", status)
 	}
-
-	// Wait for process to complete
-	time.Sleep(100 * time.Millisecond)
 }
 
 func TestProcessManager_ListProcesses(t *testing.T) {
@@ -91,13 +122,10 @@ func TestProcessManager_KillProcess(t *testing.T) {
 		t.Fatalf("Failed to kill process: %v", err)
 	}
 
-	// Wait for status to update
-	time.Sleep(100 * time.Millisecond)
-
 	// Check status
-	retrieved, _ := pm.GetProcess(process.ID)
-	if retrieved.Status != ProcessStatusKilled && retrieved.Status != ProcessStatusFailed {
-		t.Errorf("Expected status Killed or Failed, got %s", retrieved.Status)
+	status := waitForProcess(t, process)
+	if status != ProcessStatusKilled && status != ProcessStatusFailed {
+		t.Errorf("Expected status Killed or Failed, got %s", status)
 	}
 }
 
@@ -110,30 +138,20 @@ func TestProcessManager_GetProcessLogs(t *testing.T) {
 		t.Fatalf("Failed to start process: %v", err)
 	}
 
-	// Wait for process to complete
-	time.Sleep(200 * time.Millisecond)
-
-	// Get logs
-	logs, err := pm.GetProcessLogs(process.ID)
-	if err != nil {
-		t.Fatalf("Failed to get logs: %v", err)
-	}
-
-	if len(logs) == 0 {
-		t.Error("Expected some log entries")
-	}
-
 	// Check for both stdout and stderr entries
 	hasStdout := false
 	hasStderr := false
-	for _, entry := range logs {
-		if entry.Stream == "stdout" {
-			hasStdout = true
+	waitForLogs(t, pm, process.ID, func(logs []LogEntry) bool {
+		for _, entry := range logs {
+			if entry.Stream == "stdout" {
+				hasStdout = true
+			}
+			if entry.Stream == "stderr" {
+				hasStderr = true
+			}
 		}
-		if entry.Stream == "stderr" {
-			hasStderr = true
-		}
-	}
+		return hasStdout && hasStderr
+	})
 
 	if !hasStdout {
 		t.Error("Expected stdout entries")
@@ -284,18 +302,14 @@ func TestProcessWithEnvironment(t *testing.T) {
 		t.Fatalf("Failed to start process: %v", err)
 	}
 
-	// Wait for process to complete
-	time.Sleep(200 * time.Millisecond)
-
-	logs, _ := pm.GetProcessLogs(process.ID)
-	
-	foundValue := false
-	for _, entry := range logs {
-		if entry.Data == "test_value" {
-			foundValue = true
-			break
+	foundValue := waitForLogs(t, pm, process.ID, func(logs []LogEntry) bool {
+		for _, entry := range logs {
+			if entry.Data == "test_value" {
+				return true
+			}
 		}
-	}
+		return false
+	})
 
 	if !foundValue {
 		t.Error("Expected to find environment variable value in output")
@@ -311,18 +325,14 @@ func TestProcessWithWorkingDirectory(t *testing.T) {
 		t.Fatalf("Failed to start process: %v", err)
 	}
 
-	// Wait for process to complete
-	time.Sleep(200 * time.Millisecond)
-
-	logs, _ := pm.GetProcessLogs(process.ID)
-	
-	foundTmp := false
-	for _, entry := range logs {
-		if entry.Data == "/tmp" || entry.Data == "/private/tmp" { // macOS uses /private/tmp
-			foundTmp = true
-			break
+	foundTmp := waitForLogs(t, pm, process.ID, func(logs []LogEntry) bool {
+		for _, entry := range logs {
+			if entry.Data == "/tmp" || entry.Data == "/private/tmp" { // macOS uses /private/tmp
+				return true
+			}
 		}
-	}
+		return false
+	})
 
 	if !foundTmp {
 		t.Error("Expected working directory to be /tmp")
