@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -152,7 +151,14 @@ func (s *Server) runHandler(w http.ResponseWriter, r *http.Request) {
 
 	slog.Debug("Executing command", "cmd", req.Cmd, "cwd", req.Cwd, "env", req.Env)
 
-	cmd := exec.Command("sh", "-c", req.Cmd)
+	// Tie the command to the request so it is killed when the client goes away.
+	// Kill the whole process group: killing only sh would leave its children
+	// running and holding the output pipes open, so Wait would not return.
+	cmd := exec.CommandContext(r.Context(), "sh", "-c", req.Cmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 
 	// Set working directory if provided
 	if req.Cwd != "" {
@@ -167,26 +173,18 @@ func (s *Server) runHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		slog.Debug("Failed to get stdout pipe", "error", err)
-		http.Error(w, "Failed to get stdout", http.StatusInternalServerError)
-		return
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		slog.Debug("Failed to get stderr pipe", "error", err)
-		http.Error(w, "Failed to get stderr", http.StatusInternalServerError)
-		return
-	}
+	// Let os/exec drain stdout and stderr concurrently: reading one pipe to EOF
+	// before the other deadlocks once the command fills the other pipe's buffer.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		slog.Debug("Failed to start command", "cmd", req.Cmd, "error", err)
 		http.Error(w, "Failed to start command", http.StatusInternalServerError)
 		return
 	}
-	outBytes, _ := io.ReadAll(stdout)
-	errBytes, _ := io.ReadAll(stderr)
 	cmd.Wait()
+	outBytes, errBytes := stdout.Bytes(), stderr.Bytes()
 
 	exitCode := cmd.ProcessState.ExitCode()
 	slog.Debug("Command completed",

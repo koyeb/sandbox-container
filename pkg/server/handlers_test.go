@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -59,6 +60,67 @@ func TestRunHandlerLongOutput(t *testing.T) {
 
 	if len(resp.Stdout) != size {
 		t.Errorf("expected %d bytes of stdout, got %d", size, len(resp.Stdout))
+	}
+}
+
+// TestRunHandlerLargeStderr verifies that /run doesn't deadlock when a command fills
+// the stderr pipe before closing stdout. Before the fix, /run read stdout to EOF and
+// only then stderr, so the command blocked on a full stderr pipe forever.
+func TestRunHandlerLargeStderr(t *testing.T) {
+	_, mux := newTestServer(t)
+
+	const size = 200000 // over the 64KB pipe buffer
+	reqBody, _ := json.Marshal(RunRequest{Cmd: fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'e' >&2; echo ok", size)})
+
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/run", reqBody))
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("/run did not return: deadlock on a full stderr pipe")
+	}
+
+	var resp RunResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Stdout != "ok\n" {
+		t.Errorf("expected stdout %q, got %q", "ok\n", resp.Stdout)
+	}
+	if len(resp.Stderr) != size {
+		t.Errorf("expected %d bytes of stderr, got %d", size, len(resp.Stderr))
+	}
+}
+
+// TestRunHandlerClientCancel verifies that /run kills the command when the client
+// goes away instead of running it to completion.
+func TestRunHandlerClientCancel(t *testing.T) {
+	_, mux := newTestServer(t)
+
+	reqBody, _ := json.Marshal(RunRequest{Cmd: "sleep 10"})
+	ctx, cancel := context.WithCancel(context.Background())
+	req := newAuthRequest(http.MethodPost, "/run", reqBody).WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		mux.ServeHTTP(w, req)
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("/run kept running the command after the client went away")
 	}
 }
 
