@@ -1,17 +1,18 @@
 package server
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/koyeb/sandbox-container/pkg/logger"
@@ -91,6 +92,8 @@ type RunResponse struct {
 	Error  string `json:"error,omitempty"`
 	Code   int    `json:"code"`
 }
+
+var streamingCommandWaitDelay = 5 * time.Second
 
 type WriteFileRequest struct {
 	Path    string `json:"path"`
@@ -439,6 +442,17 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	writer.startKeepalive(ctx)
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", req.Cmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = streamingCommandWaitDelay
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+			return err
+		}
+		return nil
+	}
 
 	// Set working directory if provided
 	if req.Cwd != "" {
@@ -453,19 +467,13 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		slog.Debug("Failed to get stdout pipe for streaming", "error", err)
-		writer.writeEvent("error", "{\"error\": \"Failed to get stdout\"}")
-		return
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		slog.Debug("Failed to get stderr pipe for streaming", "error", err)
-		writer.writeEvent("error", "{\"error\": \"Failed to get stderr\"}")
-		return
-	}
+	// Hand os/exec io.Writers rather than StdoutPipe/StderrPipe: Wait then drains the
+	// pipes to EOF before returning, so no output is lost, and WaitDelay bounds that
+	// drain when a background child still holds the pipe.
+	stdout := &sseLineWriter{emit: func(line string) { emitStreamingOutput(writer, req.Cmd, "stdout", line) }}
+	stderr := &sseLineWriter{emit: func(line string) { emitStreamingOutput(writer, req.Cmd, "stderr", line) }}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	if err = cmd.Start(); err != nil {
 		slog.Debug("Failed to start streaming command", "cmd", req.Cmd, "error", err)
@@ -473,43 +481,20 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// WaitGroup to track completion of both stdout and stderr goroutines
-	var wg sync.WaitGroup
-
-	// streamOutput emits one SSE output event per line, matching the documented
-	// behaviour. bufio.Reader.ReadString reads complete lines of any length without
-	// a hard token limit and never splits a multi-byte UTF-8 sequence across events.
-	streamOutput := func(r io.Reader, stream string) {
-		reader := bufio.NewReader(r)
-		for {
-			line, err := reader.ReadString('\n')
-			if len(line) > 0 {
-				line = strings.TrimRight(line, "\r\n")
-				slog.Debug("Command output", "cmd", req.Cmd, "stream", stream, "line", line)
-				data, _ := json.Marshal(map[string]string{"stream": stream, "data": line})
-				writer.writeEvent("output", string(data))
-			}
-			if err != nil {
-				if err != io.EOF {
-					slog.Debug("read error", "stream", stream, "error", err)
-				}
-				return
-			}
-		}
-	}
-
-	// Stream stdout
-	wg.Go(func() { streamOutput(stdout, "stdout") })
-
-	// Stream stderr
-	wg.Go(func() { streamOutput(stderr, "stderr") })
-
-	// Wait for both stdout and stderr goroutines to drain the pipes before calling
-	// cmd.Wait(), which closes the pipe read-ends and would lose buffered data.
-	wg.Wait()
-
-	// Reap the process and get the exit code.
 	err = cmd.Wait()
+	stdout.flush()
+	stderr.flush()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// The command exited, but a background child still held stdout or stderr
+		// WaitDelay after it: kill what is left of the process group. Commands that
+		// start services must redirect their output or use /start_process.
+		slog.Info("Killing background processes still holding the output of a streaming command", "cmd", req.Cmd, "wait_delay", streamingCommandWaitDelay)
+		if killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); killErr != nil && killErr != syscall.ESRCH {
+			slog.Debug("Failed to kill streaming command process group after wait delay", "cmd", req.Cmd, "error", killErr)
+		}
+		// The command itself succeeded: report it like any other exit code 0.
+		err = nil
+	}
 	exitCode := 0
 	if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
@@ -523,6 +508,64 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 		"error": err != nil,
 	})
 	writer.writeEvent("complete", string(completeData))
+}
+
+func emitStreamingOutput(writer *sseWriter, cmd, stream, line string) {
+	slog.Debug("Command output", "cmd", cmd, "stream", stream, "line", line)
+	data, _ := json.Marshal(map[string]string{"stream": stream, "data": line})
+	writer.writeEvent("output", string(data))
+}
+
+// sseLineWriter splits a command's output into lines and emits one event per line,
+// as soon as the line ends. Lines end at '\n', and also at '\r' so that progress
+// output redrawn in place (git clone, curl, pip) streams live. "\r\n" is a single
+// line ending. Empty lines are emitted, except between two '\r' redraws.
+// os/exec calls Write from a single goroutine per stream.
+type sseLineWriter struct {
+	line []byte
+	// afterCR is true when the last line ending was a '\r' that emitted a line, so
+	// that a '\n' right after it completes "\r\n" instead of emitting an empty line.
+	afterCR bool
+	emit    func(string)
+}
+
+func (w *sseLineWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	for len(p) > 0 {
+		idx := bytes.IndexAny(p, "\r\n")
+		if idx == -1 {
+			w.line = append(w.line, p...)
+			break
+		}
+		w.line = append(w.line, p[:idx]...)
+		switch {
+		case p[idx] == '\r':
+			if len(w.line) > 0 {
+				w.flush()
+				w.afterCR = true
+			}
+		case w.afterCR && len(w.line) == 0:
+			w.afterCR = false
+		default:
+			w.emitLine()
+			w.afterCR = false
+		}
+		p = p[idx+1:]
+	}
+	return n, nil
+}
+
+// flush emits the pending partial line, if any.
+func (w *sseLineWriter) flush() {
+	if len(w.line) > 0 {
+		w.emitLine()
+	}
+}
+
+func (w *sseLineWriter) emitLine() {
+	line := string(w.line)
+	w.line = w.line[:0]
+	w.emit(line)
 }
 
 type BindPortRequest struct {

@@ -114,9 +114,11 @@ Content-Type: application/json
 ```
 Executes a shell command and streams the output in real-time using Server-Sent Events (SSE). The response includes:
 
-- `output` events for each line of stdout/stderr as it's produced
+- `output` events for each line of stdout/stderr as it's produced (lines end at `\n`, `\r\n`, or `\r`, so in-place progress output streams live)
 - `complete` event when the command finishes with exit code
 - `error` event if the command fails to start
+
+Background processes started by the command must redirect their output or use `/start_process`: one still holding stdout/stderr 5 seconds after the command exits is killed. If the client disconnects, the command's whole process group is killed.
 
 **Example Response Stream:**
 ```
