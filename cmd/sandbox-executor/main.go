@@ -154,9 +154,11 @@ func main() {
 }
 
 func loadConfigFromEnv() (runtimeConfig, error) {
+	// SANDBOX_PORT, not PORT: the platform sets PORT for the customer's app, which
+	// runs next to the executor in the same network namespace.
 	config := runtimeConfig{
-		Port:      getenvDefault("PORT", "3030"),
-		ProxyPort: getenvDefault("PROXY_PORT", "3031"),
+		Port:      getenvDefault("SANDBOX_PORT", "3030"),
+		ProxyPort: getenvDefault("SANDBOX_PROXY_PORT", "3031"),
 		Auth: server.AuthConfig{
 			Mode:       server.AuthMode(strings.ToLower(os.Getenv("SANDBOX_AUTH_MODE"))),
 			Secret:     os.Getenv("SANDBOX_SECRET"),

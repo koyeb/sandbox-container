@@ -506,7 +506,7 @@ curl -X POST http://localhost:8080/list_dir \
 Returns HTTP 409 Conflict status code.
 
 **Notes:**
-- The TCP proxy listens on `PROXY_PORT` (default: 3031) and forwards traffic to the specified internal port
+- The TCP proxy listens on `SANDBOX_PROXY_PORT` (default: 3031) and forwards traffic to the specified internal port
 - Only one port binding can be active at a time; attempting to bind when a port is already bound will return an error
 - You must unbind the current port before binding a new one
 - The port must be available and accessible within the sandbox environment

@@ -10,8 +10,8 @@ func TestLoadConfigFromEnvStaticMode(t *testing.T) {
 	t.Setenv("SANDBOX_SECRET", "static-secret")
 	t.Setenv("SANDBOX_AUTH_MODE", "")
 	t.Setenv("SANDBOX_SECRET_PATH", "")
-	t.Setenv("PORT", "")
-	t.Setenv("PROXY_PORT", "")
+	t.Setenv("SANDBOX_PORT", "")
+	t.Setenv("SANDBOX_PROXY_PORT", "")
 
 	config, err := loadConfigFromEnv()
 	if err != nil {
@@ -26,6 +26,39 @@ func TestLoadConfigFromEnvStaticMode(t *testing.T) {
 	}
 	if config.Port != "3030" || config.ProxyPort != "3031" {
 		t.Fatalf("expected default ports, got port=%q proxy_port=%q", config.Port, config.ProxyPort)
+	}
+}
+
+func TestLoadConfigFromEnvIgnoresAppPorts(t *testing.T) {
+	t.Setenv("SANDBOX_SECRET", "static-secret")
+	t.Setenv("SANDBOX_AUTH_MODE", "")
+	t.Setenv("SANDBOX_PORT", "")
+	t.Setenv("SANDBOX_PROXY_PORT", "")
+	// The platform sets PORT to the customer's app port: the executor must not bind it.
+	t.Setenv("PORT", "8080")
+	t.Setenv("PROXY_PORT", "8081")
+
+	config, err := loadConfigFromEnv()
+	if err != nil {
+		t.Fatalf("expected static config to load: %v", err)
+	}
+	if config.Port != "3030" || config.ProxyPort != "3031" {
+		t.Fatalf("expected default ports, got port=%q proxy_port=%q", config.Port, config.ProxyPort)
+	}
+}
+
+func TestLoadConfigFromEnvSandboxPorts(t *testing.T) {
+	t.Setenv("SANDBOX_SECRET", "static-secret")
+	t.Setenv("SANDBOX_AUTH_MODE", "")
+	t.Setenv("SANDBOX_PORT", "4040")
+	t.Setenv("SANDBOX_PROXY_PORT", "4041")
+
+	config, err := loadConfigFromEnv()
+	if err != nil {
+		t.Fatalf("expected static config to load: %v", err)
+	}
+	if config.Port != "4040" || config.ProxyPort != "4041" {
+		t.Fatalf("expected configured ports, got port=%q proxy_port=%q", config.Port, config.ProxyPort)
 	}
 }
 
