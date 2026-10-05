@@ -48,10 +48,10 @@ docker run --rm -p 3030:3030 -p 3031:3031 \
 make build
 
 # Run locally in static auth mode
-SANDBOX_SECRET=your-secret-here PORT=3030 ./bin/sandbox-executor
+SANDBOX_SECRET=your-secret-here SANDBOX_PORT=3030 ./bin/sandbox-executor
 
 # Run locally in pool auth mode
-SANDBOX_AUTH_MODE=pool SANDBOX_SECRET_PATH=/tmp/sandbox-secret PORT=3030 ./bin/sandbox-executor
+SANDBOX_AUTH_MODE=pool SANDBOX_SECRET_PATH=/tmp/sandbox-secret SANDBOX_PORT=3030 ./bin/sandbox-executor
 ```
 
 ## Configuration
@@ -66,8 +66,10 @@ Environment variables:
 - `SANDBOX_AUTH_MODE` (optional): `static` or `pool`, defaults to `static`
 - `SANDBOX_SECRET` (required in `static` mode): Authentication token for API endpoints
 - `SANDBOX_SECRET_PATH` (optional in `pool` mode): Secret file path, defaults to `/var/lib/sandbox-container/sandbox-secret`
-- `PORT` (optional): HTTP server port, defaults to `3030`
-- `PROXY_PORT` (optional): TCP proxy server port, defaults to `3031`
+- `SANDBOX_PORT` (optional): HTTP server port, defaults to `3030`
+- `SANDBOX_PROXY_PORT` (optional): TCP proxy server port, defaults to `3031`
+
+The executor ignores `PORT` and `PROXY_PORT`: on Koyeb, `PORT` is the port of the app running next to it.
 
 In `pool` mode, do not set `SANDBOX_SECRET`; the server will reject that configuration.
 
@@ -207,7 +209,7 @@ Content-Type: application/json
   "port": "8080"
 }
 ```
-Configures the TCP proxy (listening on `PROXY_PORT`, default 3031) to forward traffic to the specified port. This allows you to expose services running inside the sandbox to external connections.
+Configures the TCP proxy (listening on `SANDBOX_PROXY_PORT`, default 3031) to forward traffic to the specified port. This allows you to expose services running inside the sandbox to external connections.
 
 **Response on Success:**
 ```json
