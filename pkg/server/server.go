@@ -45,6 +45,7 @@ func (s *Server) RegisterRoutes() *http.ServeMux {
 	mux.Handle("/list_processes", s.authMiddleware(http.HandlerFunc(s.listProcessesHandler)))
 	mux.Handle("/kill_process", s.authMiddleware(http.HandlerFunc(s.killProcessHandler)))
 	mux.Handle("/process_logs_streaming", s.authMiddleware(http.HandlerFunc(s.processLogsStreamingHandler)))
+	s.registerFileRoutes(mux)
 	return mux
 }
 

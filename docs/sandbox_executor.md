@@ -8,7 +8,7 @@ The Sandbox Executor is an HTTP server that provides a secure API for executing 
 
 - **Command Execution:** Run one-off commands synchronously or with streaming output
 - **Background Process Management:** Start, monitor, and control long-running background processes
-- **File Operations:** Create, read, update, and delete files and directories
+- **File Operations:** Create, read, update, and delete files and directories; stream raw bytes of any size
 - **Port Binding:** Expose internal services via TCP proxy
 - **Real-time Logging:** Stream process output in real-time using Server-Sent Events
 
@@ -20,6 +20,11 @@ The Sandbox Executor is an HTTP server that provides a secure API for executing 
 - [Run Command (Streaming)](#run-command-streaming)
 
 ### File Operations
+- [Files (raw bytes)](#files-raw-bytes)
+  - [Download File](#download-file)
+  - [Upload File](#upload-file)
+  - [Stat File](#stat-file)
+  - [List Files](#list-files)
 - [Write File](#write-file)
 - [Read File](#read-file)
 - [Delete File](#delete-file)
@@ -229,6 +234,158 @@ data: {"code":0,"error":false}
 - Background processes started by the command (`server &`) must redirect their output (`server >/tmp/server.log 2>&1 &`), or be started with `/start_process`. A background process still holding stdout or stderr 5 seconds after the command exits is killed with SIGKILL, and the stream then completes with the command's exit code
 - If the client disconnects, the command and every process it started (its whole process group, including redirected background processes) are killed
 - For simple commands where buffered output is acceptable, use `/run` instead
+
+---
+
+### Files (raw bytes)
+
+The `/files` routes move a file's raw bytes in the HTTP body, streamed to and from disk: they are binary-safe and
+the executor's memory does not grow with the file size. They are the routes to use for new clients; the JSON routes
+(`/write_file`, `/read_file`, ...) are kept unchanged for older ones.
+
+- The path is the `path` query parameter (URL-encoded). A relative path is relative to the executor's working
+  directory.
+- Errors use HTTP status codes, with a JSON body `{"error": "..."}`:
+
+| Status | When |
+|---|---|
+| `400 Bad Request` | missing `path`, invalid parameter or header, a body that ended early, a checksum mismatch, a directory where a file is expected (or the reverse) |
+| `403 Forbidden` | permission denied |
+| `404 Not Found` | the path, or a parent directory, does not exist |
+| `409 Conflict` | something is in the way: a `PUT` onto a directory, or a parent that is a file |
+| `500 Internal Server Error` | any other filesystem error (e.g. disk full) |
+
+---
+
+### Download File
+
+**Endpoint:** `GET /files?path=<path>` (and `HEAD`)
+
+**Description:** Streams the file's bytes, with `Content-Type: application/octet-stream`. `HEAD` returns the same
+headers without the body.
+
+**Headers returned:** `Content-Length`, `ETag` (from size and modification time), `Last-Modified`,
+`Accept-Ranges: bytes`.
+
+**Request headers supported:**
+- `Range: bytes=<start>-[<end>]`: returns `206 Partial Content` with that range (`416` if it starts past the end)
+- `If-Range: <etag>`: with `Range`, returns the range only if the file still has that ETag, else the whole file
+  with `200`. This is how an interrupted download resumes safely
+- `If-None-Match`, `If-Modified-Since`: `304 Not Modified` when the client's copy is current
+
+**Notes:**
+- Symlinks are followed
+- `400` for a directory or anything that is not a regular file (device, FIFO, socket)
+- A file that reports a size of 0 (an empty file, or a pseudo-file under `/proc` or `/sys`) is streamed as it
+  reads, without `Content-Length`, `ETag` or Range support: use [Stat File](#stat-file) for a size
+
+**Example:**
+```bash
+# Download
+curl -H "Authorization: Bearer your-secret" -o data.bin \
+  "http://localhost:8080/files?path=/tmp/data.bin"
+
+# Resume: ask for the rest of the file if it hasn't changed
+curl -H "Authorization: Bearer your-secret" \
+  -H "Range: bytes=1048576-" -H 'If-Range: "100000-1869a2b9c1e2f000"' \
+  "http://localhost:8080/files?path=/tmp/data.bin"
+```
+
+---
+
+### Upload File
+
+**Endpoint:** `PUT /files?path=<path>[&mode=<octal>][&parents=1]`
+
+**Description:** Writes the request body to the file, creating or replacing it atomically: the body goes to a
+temp file next to the destination (`.<name>.koyeb-tmp-<random>`), which is synced to disk and then renamed over
+the destination. A request that fails or ends early leaves the destination as it was and removes the temp file.
+
+**Parameters:**
+- `path` (required): the file to write. If it is a symlink, its target is written (and created if it doesn't
+  exist yet), like `/write_file`. A replaced file gets the executor's owner: it is a new file renamed into place
+- `mode` (optional): octal permission bits, `0000` to `0777`, e.g. `0755`. Default: the existing file's mode when
+  replacing one, else `0644`
+- `parents=1` (optional): create missing parent directories (`0755`), like `mkdir -p`. Without it, a missing
+  parent is a `404`
+
+**Request headers:**
+- `X-Content-SHA256` (optional): the hex sha256 of the body. It is computed while the body streams and checked
+  before the rename: a mismatch is a `400` and leaves the destination as it was
+
+**Response:**
+```json
+{
+  "size": 2147483648,
+  "sha256": "45cd16e148159c8ca859ffb81cbfa8983cdce59fbd210f6f21b68f0c8e0d0d39"
+}
+```
+
+**Example:**
+```bash
+curl -T data.bin -H "Authorization: Bearer your-secret" \
+  -H "X-Content-SHA256: $(sha256sum data.bin | cut -d' ' -f1)" \
+  "http://localhost:8080/files?path=/tmp/out/data.bin&parents=1"
+```
+
+---
+
+### Stat File
+
+**Endpoint:** `GET /files/stat?path=<path>[&hash=sha256]`
+
+**Description:** Returns a file's metadata. Symlinks are followed, like a download. With `hash=sha256`, the file
+is read once to compute its sha256 (regular files only).
+
+**Response:**
+```json
+{
+  "type": "file",
+  "size": 5,
+  "mode": "0644",
+  "mtime": "2026-10-08T15:04:05.123456789Z",
+  "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+}
+```
+
+- `type`: `file`, `dir`, `symlink` or `other`
+- `mode`: the permission bits, in octal
+- `mtime`: the modification time, RFC 3339 in UTC with nanoseconds
+
+**Example:**
+```bash
+curl -H "Authorization: Bearer your-secret" \
+  "http://localhost:8080/files/stat?path=/tmp/data.bin&hash=sha256"
+```
+
+---
+
+### List Files
+
+**Endpoint:** `GET /files/list?path=<dir>[&recursive=1]`
+
+**Description:** Lists a directory as NDJSON (`Content-Type: application/x-ndjson`): one JSON object per line,
+written as the directory is read, so a large tree is never built in memory. Without `recursive=1`, only the
+directory's direct entries are listed.
+
+**Response:** one line per entry, in lexical order, the directory itself excluded:
+```
+{"path":"src","type":"dir","size":4096,"mode":"0755","mtime":"2026-10-08T15:04:05.123456789Z"}
+{"path":"src/main.go","type":"file","size":1234,"mode":"0644","mtime":"2026-10-08T15:04:05.123456789Z"}
+{"path":"latest","type":"symlink","size":3,"mode":"0777","mtime":"2026-10-08T15:04:05.123456789Z"}
+```
+
+- `path` is relative to the listed directory, with `/` separators
+- Fields are the same as [Stat File](#stat-file), without `sha256`
+- Symlinks inside the directory are listed, never followed; `path` itself may be a symlink to a directory
+- `400` if `path` is not a directory. Once the listing has started, an entry that can't be read (e.g. a
+  subdirectory without read permission) is listed as `{"path": "...", "error": "..."}` and the listing goes on
+
+**Example:**
+```bash
+curl -H "Authorization: Bearer your-secret" \
+  "http://localhost:8080/files/list?path=/workspace&recursive=1"
+```
 
 ---
 
@@ -967,13 +1124,19 @@ All endpoints return appropriate HTTP status codes:
 
 - `200 OK`: Request succeeded
 - `201 Created`: Resource created successfully (e.g., process started)
+- `206 Partial Content`: A range of a file (`GET /files` with `Range`)
 - `400 Bad Request`: Invalid request body or parameters
 - `401 Unauthorized`: Missing or invalid authentication token
+- `403 Forbidden`: Permission denied on a file (`/files` routes)
+- `404 Not Found`: The file or directory does not exist (`/files` routes)
 - `405 Method Not Allowed`: Wrong HTTP method used
-- `409 Conflict`: Resource conflict (e.g., port already bound)
+- `409 Conflict`: Resource conflict (e.g., port already bound, a directory in the way of a file)
+- `416 Range Not Satisfiable`: A `Range` that starts past the end of the file
 - `500 Internal Server Error`: Server-side error during operation
 
-Error responses include descriptive error messages in the response body.
+Error responses include descriptive error messages in the response body. The `/files` routes always return them
+as JSON, `{"error": "..."}`; the JSON file routes (`/write_file`, `/read_file`, ...) answer `200` with an `error`
+field instead.
 
 ## Security Considerations
 
