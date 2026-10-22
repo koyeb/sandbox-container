@@ -379,7 +379,7 @@ directory's direct entries are listed.
 - Fields are the same as [Stat File](#stat-file), without `sha256`
 - Symlinks inside the directory are listed, never followed; `path` itself may be a symlink to a directory
 - `400` if `path` is not a directory. Once the listing has started, an entry that can't be read (e.g. a
-  subdirectory without read permission) is listed as `{"path": "...", "error": "..."}` and the listing goes on
+  subdirectory without read permission) is listed as `{"path": "...", "size": 0, "error": "..."}` and the listing goes on
 
 **Example:**
 ```bash
