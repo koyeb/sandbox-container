@@ -61,7 +61,7 @@ func fsErrorStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, fs.ErrPermission):
 		return http.StatusForbidden
-	case errors.Is(err, fs.ErrExist), errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.EISDIR), errors.Is(err, syscall.ENOTEMPTY):
+	case errors.Is(err, errDestIsDir), errors.Is(err, fs.ErrExist), errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.EISDIR), errors.Is(err, syscall.ENOTEMPTY):
 		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
@@ -146,61 +146,34 @@ func (s *Server) getFileHandler(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "", info.ModTime(), f)
 }
 
+// errDestIsDir marks a PUT whose resolved destination is a directory.
+var errDestIsDir = errors.New("destination is a directory")
+
 func (s *Server) putFileHandler(w http.ResponseWriter, r *http.Request) {
 	path, ok := pathParam(w, r)
 	if !ok {
 		return
 	}
-	query := r.URL.Query()
-
-	var mode fs.FileMode = 0o644
-	modeSet := query.Get("mode") != ""
-	if modeSet {
-		m, err := strconv.ParseUint(query.Get("mode"), 8, 32)
-		if err != nil || m > 0o777 {
-			writeFileError(w, http.StatusBadRequest, "mode must be octal permission bits, e.g. 0644")
-			return
-		}
-		mode = fs.FileMode(m)
+	mode, modeSet, parents, wantSum, err := parsePutParams(r)
+	if err != nil {
+		writeFileError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
-	wantSum := strings.ToLower(r.Header.Get("X-Content-SHA256"))
-	if wantSum != "" {
-		if b, err := hex.DecodeString(wantSum); err != nil || len(b) != sha256.Size {
-			writeFileError(w, http.StatusBadRequest, "X-Content-SHA256 must be 64 hex characters")
-			return
-		}
-	}
-
-	path = writeTarget(path)
-	if info, err := os.Stat(path); err == nil {
-		if info.IsDir() {
-			writeFileError(w, http.StatusConflict, fmt.Sprintf("%s is a directory", path))
-			return
-		}
-		if !modeSet {
-			mode = info.Mode().Perm()
-		}
-	}
-
-	dir, name := filepath.Split(path)
-	if dir == "" {
-		dir = "."
-	}
-	if query.Get("parents") == "1" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			writeFSError(w, err)
-			return
-		}
+	dir, name, mode, err := resolvePutTarget(path, mode, modeSet, parents)
+	if err != nil {
+		slog.Debug("Failed to prepare destination", "path", path, "error", err)
+		writeFSError(w, err)
+		return
 	}
 
 	// Write to a temp file next to the destination and rename it into place,
 	// so readers never see a partial file and a failed upload leaves the
 	// destination as it was.
-	tmp, err := os.CreateTemp(dir, "."+name+".koyeb-tmp-*")
+	tmp, size, sum, err := receiveToTemp(r, dir, name)
 	if err != nil {
-		slog.Debug("Failed to create temp file", "path", path, "error", err)
-		writeFSError(w, err)
+		slog.Debug("Failed to receive file", "path", path, "error", err)
+		writeReceiveError(w, err)
 		return
 	}
 	committed := false
@@ -211,28 +184,12 @@ func (s *Server) putFileHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	h := sha256.New()
-	size, err := io.Copy(io.MultiWriter(tmp, h), r.Body)
-	if err != nil {
-		slog.Debug("Failed to receive file", "path", path, "bytes", size, "error", err)
-		// A read error means the client went away or sent a short body; a
-		// write error is the disk's.
-		var pathErr *fs.PathError
-		if errors.As(err, &pathErr) {
-			writeFSError(w, err)
-		} else {
-			writeFileError(w, http.StatusBadRequest, fmt.Sprintf("reading request body: %v", err))
-		}
-		return
-	}
-
-	sum := hex.EncodeToString(h.Sum(nil))
 	if wantSum != "" && sum != wantSum {
 		writeFileError(w, http.StatusBadRequest, fmt.Sprintf("sha256 mismatch: got %s, expected %s", sum, wantSum))
 		return
 	}
 
-	if err := commitTempFile(tmp, path, mode); err != nil {
+	if err := commitTempFile(tmp, filepath.Join(dir, name), mode); err != nil {
 		slog.Debug("Failed to commit file", "path", path, "error", err)
 		writeFSError(w, err)
 		return
@@ -244,25 +201,105 @@ func (s *Server) putFileHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(PutFileResponse{Size: size, SHA256: sum})
 }
 
+// parsePutParams validates the optional mode, parents and X-Content-SHA256
+// of a PUT. mode is the default 0644 unless mode= was given.
+func parsePutParams(r *http.Request) (mode fs.FileMode, modeSet, parents bool, wantSum string, err error) {
+	mode = 0o644
+	parents = r.URL.Query().Get("parents") == "1"
+	if m := r.URL.Query().Get("mode"); m != "" {
+		v, err := strconv.ParseUint(m, 8, 32)
+		if err != nil || v > 0o777 {
+			return 0, false, false, "", errors.New("mode must be octal permission bits, e.g. 0644")
+		}
+		mode, modeSet = fs.FileMode(v), true
+	}
+	wantSum = strings.ToLower(r.Header.Get("X-Content-SHA256"))
+	if wantSum != "" {
+		if b, err := hex.DecodeString(wantSum); err != nil || len(b) != sha256.Size {
+			return 0, false, false, "", errors.New("X-Content-SHA256 must be 64 hex characters")
+		}
+	}
+	return mode, modeSet, parents, wantSum, nil
+}
+
+// resolvePutTarget follows symlinks at path (as /write_file does), carries an
+// existing destination's mode over when mode= wasn't given, and creates the
+// parent directories when parents was requested. It returns the directory to
+// create the temp file in, the destination's file name, and the mode to commit
+// with.
+func resolvePutTarget(path string, mode fs.FileMode, modeSet, parents bool) (dir, name string, effMode fs.FileMode, err error) {
+	path, err = writeTarget(path)
+	if err != nil {
+		return "", "", 0, err
+	}
+	if info, err := os.Stat(path); err == nil {
+		if info.IsDir() {
+			return "", "", 0, &fs.PathError{Op: "put", Path: path, Err: errDestIsDir}
+		}
+		if !modeSet {
+			mode = info.Mode().Perm()
+		}
+	}
+	dir, name = filepath.Split(path)
+	if dir == "" {
+		dir = "."
+	}
+	if parents {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", "", 0, err
+		}
+	}
+	return dir, name, mode, nil
+}
+
+// writeReceiveError classifies a failed receive: a read error means the
+// client went away or sent a short body; a write error is the disk's.
+func writeReceiveError(w http.ResponseWriter, err error) {
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		writeFSError(w, err)
+	} else {
+		writeFileError(w, http.StatusBadRequest, fmt.Sprintf("reading request body: %v", err))
+	}
+}
+
+// receiveToTemp streams the request body into a new temp file in dir,
+// hashing it as it goes. An error that is not an *fs.PathError means the
+// body read failed, not the disk.
+func receiveToTemp(r *http.Request, dir, name string) (*os.File, int64, string, error) {
+	tmp, err := os.CreateTemp(dir, "."+name+".koyeb-tmp-*")
+	if err != nil {
+		return nil, 0, "", err
+	}
+	h := sha256.New()
+	size, err := io.Copy(io.MultiWriter(tmp, h), r.Body)
+	if err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, 0, "", err
+	}
+	return tmp, size, hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // writeTarget follows symlinks at path, as /write_file does, rather than
 // replacing the link, including a link whose target doesn't exist yet.
-func writeTarget(path string) string {
-	// 40 hops, the kernel's limit: past it, the loop is left to fail as ELOOP.
+func writeTarget(path string) (string, error) {
+	// 40 hops, the kernel's limit.
 	for range 40 {
 		info, err := os.Lstat(path)
 		if err != nil || info.Mode()&fs.ModeSymlink == 0 {
-			return path
+			return path, nil
 		}
 		target, err := os.Readlink(path)
 		if err != nil {
-			return path
+			return path, nil
 		}
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(path), target)
 		}
 		path = target
 	}
-	return path
+	return path, nil
 }
 
 // commitTempFile makes tmp durable with mode and renames it to path.
@@ -373,35 +410,45 @@ func (s *Server) listFilesHandler(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
 	count := 0
 	err = filepath.WalkDir(walkRoot, func(p string, d fs.DirEntry, err error) error {
-		if p == walkRoot && err == nil {
-			return nil
+		emitted, walkErr := encodeListEntry(enc, walkRoot, p, d, err, recursive)
+		if emitted {
+			count++
 		}
-		rel, relErr := filepath.Rel(walkRoot, p)
-		if relErr != nil {
-			return relErr
-		}
-		rel = filepath.ToSlash(rel)
-		if err != nil {
-			return enc.Encode(FileEntry{Path: rel, Error: err.Error()})
-		}
-		// WalkDir doesn't follow symlinks, and Info is an lstat.
-		fi, err := d.Info()
-		if err != nil {
-			return enc.Encode(FileEntry{Path: rel, Error: err.Error()})
-		}
-		// An encode error is a failed write: the client is gone, stop the walk.
-		if err := enc.Encode(fileEntry(rel, fi)); err != nil {
-			return err
-		}
-		count++
-		if d.IsDir() && !recursive {
-			return filepath.SkipDir
-		}
-		return nil
+		return walkErr
 	})
 	if err != nil {
 		slog.Debug("Listing stopped", "path", root, "entries", count, "error", err)
 		return
 	}
 	slog.Debug("Files listed", "path", root, "entries", count)
+}
+
+// encodeListEntry emits one NDJSON line for a walk entry and returns the
+// value the WalkDir callback should return. emitted reports whether a
+// regular entry was written. WalkDir doesn't follow symlinks, and Info is
+// an lstat.
+func encodeListEntry(enc *json.Encoder, walkRoot, p string, d fs.DirEntry, walkErr error, recursive bool) (emitted bool, err error) {
+	if p == walkRoot && walkErr == nil {
+		return false, nil
+	}
+	rel, relErr := filepath.Rel(walkRoot, p)
+	if relErr != nil {
+		return false, relErr
+	}
+	rel = filepath.ToSlash(rel)
+	if walkErr != nil {
+		return false, enc.Encode(FileEntry{Path: rel, Error: walkErr.Error()})
+	}
+	fi, err := d.Info()
+	if err != nil {
+		return false, enc.Encode(FileEntry{Path: rel, Error: err.Error()})
+	}
+	// An encode error is a failed write: the client is gone, stop the walk.
+	if err := enc.Encode(fileEntry(rel, fi)); err != nil {
+		return false, err
+	}
+	if d.IsDir() && !recursive {
+		return true, filepath.SkipDir
+	}
+	return true, nil
 }
