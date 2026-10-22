@@ -169,7 +169,9 @@ func (s *Server) getFileHandler(w http.ResponseWriter, r *http.Request) {
 	// them as they read, without a length, a validator or Range.
 	if info.Size() == 0 {
 		if r.Method != http.MethodHead {
-			io.Copy(w, f)
+			if _, err := io.Copy(w, f); err != nil {
+				slog.Debug("Failed to stream file", "path", path, "error", err)
+			}
 		}
 		return
 	}
