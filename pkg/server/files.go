@@ -104,29 +104,63 @@ func fileEntry(rel string, info fs.FileInfo) FileEntry {
 	}
 }
 
+// notRegularError reports a download target that is a FIFO, socket, device
+// or directory: open() on a writer-less FIFO would block until a writer
+// appears, holding the handler and its connection forever.
+type notRegularError struct {
+	path string
+	kind string
+}
+
+func (e notRegularError) Error() string {
+	return fmt.Sprintf("%s is not a regular file (it is a %s)", e.path, e.kind)
+}
+
+// openRegular opens path for download, following symlinks like the download
+// itself does, and returns the opened file with its Stat. A special file is
+// rejected before the open; a race that swaps the file for a special one
+// between Stat and Open is caught after it.
+func openRegular(path string) (*os.File, fs.FileInfo, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, notRegularError{path: path, kind: fileType(info.Mode())}
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if info, err = f.Stat(); err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, nil, notRegularError{path: path, kind: fileType(info.Mode())}
+	}
+	return f, info, nil
+}
+
 func (s *Server) getFileHandler(w http.ResponseWriter, r *http.Request) {
 	path, ok := pathParam(w, r)
 	if !ok {
 		return
 	}
 
-	f, err := os.Open(path)
+	f, info, err := openRegular(path)
 	if err != nil {
-		slog.Debug("Failed to open file", "path", path, "error", err)
-		writeFSError(w, err)
+		var nre notRegularError
+		if errors.As(err, &nre) {
+			writeFileError(w, http.StatusBadRequest, nre.Error())
+		} else {
+			slog.Debug("Failed to open file", "path", path, "error", err)
+			writeFSError(w, err)
+		}
 		return
 	}
 	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		writeFSError(w, err)
-		return
-	}
-	if !info.Mode().IsRegular() {
-		writeFileError(w, http.StatusBadRequest, fmt.Sprintf("%s is a %s, not a regular file", path, fileType(info.Mode())))
-		return
-	}
 
 	slog.Debug("Serving file", "path", path, "bytes", info.Size(), "range", r.Header.Get("Range"))
 	w.Header().Set("Content-Type", "application/octet-stream")

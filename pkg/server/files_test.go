@@ -8,13 +8,16 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func filesURL(route, path string, params ...string) string {
@@ -408,5 +411,58 @@ func TestFilesErrors(t *testing.T) {
 	}
 	if w := serve(mux, newAuthRequest(http.MethodPost, filesURL("/files", file), nil)); w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST /files: %d", w.Code)
+	}
+}
+
+// GET on a writer-less FIFO must return the documented 400, not block in
+// open() holding the handler and its connection forever.
+func TestFilesGetFIFO(t *testing.T) {
+	_, mux := newTestServer(t)
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := newAuthRequest(http.MethodGet, filesURL("/files", fifo), nil)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- serve(mux, req) }()
+	select {
+	case w := <-done:
+		expectError(t, w, http.StatusBadRequest)
+	case <-time.After(3 * time.Second):
+		t.Fatal("GET on a FIFO did not return; the handler blocked in open()")
+	}
+}
+
+// GET on a unix socket path is rejected before the open, like other special
+// files.
+func TestFilesGetSocket(t *testing.T) {
+	_, mux := newTestServer(t)
+	sock := filepath.Join(t.TempDir(), "sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Skipf("unix sockets unavailable: %v", err)
+	}
+	defer ln.Close()
+	expectError(t, serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", sock), nil)), http.StatusBadRequest)
+}
+
+// stat reports special files as type "other": it stats them, and never
+// follows them into a blocking read.
+func TestFilesStatSpecial(t *testing.T) {
+	_, mux := newTestServer(t)
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var entry FileEntry
+	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files/stat", fifo), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("stat FIFO: %d %s", w.Code, w.Body.String())
+	}
+	if err := json.NewDecoder(w.Body).Decode(&entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Type != "other" {
+		t.Errorf("stat FIFO type %q, expected other", entry.Type)
 	}
 }
