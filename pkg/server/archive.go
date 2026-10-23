@@ -29,11 +29,11 @@ type ArchiveResult struct {
 	Bytes int64 `json:"bytes"`
 }
 
-// archiveRequest validates a GET /files/archive request — path present,
+// parseArchiveRequest validates a GET /files/archive request — path present,
 // exclude patterns well-formed, root an existing directory — writing the
 // error response itself, and returns the resolved root to walk with the
 // exclude patterns.
-func archiveRequest(w http.ResponseWriter, r *http.Request) (
+func parseArchiveRequest(w http.ResponseWriter, r *http.Request) (
 	walkRoot string, excludes []string, ok bool) {
 	root, hasPath := pathParam(w, r)
 	if !hasPath {
@@ -279,7 +279,7 @@ func writeExtractError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) getArchiveHandler(w http.ResponseWriter, r *http.Request) {
-	walkRoot, excludes, ok := archiveRequest(w, r)
+	walkRoot, excludes, ok := parseArchiveRequest(w, r)
 	if !ok {
 		return
 	}
