@@ -17,6 +17,24 @@ import (
 	"github.com/koyeb/sandbox-container/pkg/logger"
 )
 
+// writeJSON answers with status and a JSON body.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+// writeResult answers with the JSON routes' result envelope: 200 with
+// {"success": bool, "error": ...}. Old clients read the envelope, not the
+// status code.
+func writeResult(w http.ResponseWriter, err error) {
+	resp := map[string]any{"success": err == nil}
+	if err != nil {
+		resp["error"] = err.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // sseWriter provides thread-safe writing for Server-Sent Events
 type sseWriter struct {
 	w        http.ResponseWriter
@@ -201,8 +219,7 @@ func (s *Server) runHandler(w http.ResponseWriter, r *http.Request) {
 	if exitCode != 0 {
 		resp.Error = "Non-zero exit code"
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // Process management handlers
@@ -249,12 +266,7 @@ func (s *Server) startProcessHandler(w http.ResponseWriter, r *http.Request) {
 	process, err := s.processManager.StartProcess(req.Cmd, req.Cwd, req.Env)
 	if err != nil {
 		slog.Debug("Failed to start process", "cmd", req.Cmd, "error", err)
-		resp := StartProcessResponse{
-			Error: err.Error(),
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(resp)
+		writeJSON(w, http.StatusInternalServerError, StartProcessResponse{Error: err.Error()})
 		return
 	}
 
@@ -266,9 +278,7 @@ func (s *Server) startProcessHandler(w http.ResponseWriter, r *http.Request) {
 		Status: string(process.Status),
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 type ListProcessesResponse struct {
@@ -292,12 +302,7 @@ func (s *Server) listProcessesHandler(w http.ResponseWriter, r *http.Request) {
 
 	slog.Debug("Processes listed", "count", len(processes))
 
-	resp := ListProcessesResponse{
-		Processes: processesData,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, ListProcessesResponse{Processes: processesData})
 }
 
 type KillProcessRequest struct {
@@ -332,25 +337,13 @@ func (s *Server) killProcessHandler(w http.ResponseWriter, r *http.Request) {
 	err := s.processManager.KillProcess(req.ID)
 	if err != nil {
 		slog.Debug("Failed to kill process", "id", req.ID, "error", err)
-		resp := KillProcessResponse{
-			Success: false,
-			Error:   err.Error(),
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(resp)
+		writeJSON(w, http.StatusBadRequest, KillProcessResponse{Success: false, Error: err.Error()})
 		return
 	}
 
 	slog.Debug("Process killed successfully via API", "id", req.ID)
 
-	resp := KillProcessResponse{
-		Success: true,
-		Message: "Process killed successfully",
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, KillProcessResponse{Success: true, Message: "Process killed successfully"})
 }
 
 func (s *Server) processLogsStreamingHandler(w http.ResponseWriter, r *http.Request) {
@@ -588,27 +581,22 @@ func (s *Server) bindPortHandler(w http.ResponseWriter, r *http.Request) {
 	currentPort := s.tcpProxy.GetTargetPort()
 	if currentPort != "" {
 		slog.Debug("Port already bound", "current_port", currentPort, "requested_port", req.Port)
-		resp := map[string]interface{}{
+		writeJSON(w, http.StatusConflict, map[string]any{
 			"success":      false,
 			"error":        "Port already bound",
 			"current_port": currentPort,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(resp)
+		})
 		return
 	}
 
 	s.tcpProxy.SetTargetPort(req.Port)
 	slog.Debug("Port bound successfully", "port", req.Port)
 
-	resp := map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"message": "Port binding configured",
 		"port":    req.Port,
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	})
 }
 
 func (s *Server) unbindPortHandler(w http.ResponseWriter, r *http.Request) {
@@ -618,12 +606,10 @@ func (s *Server) unbindPortHandler(w http.ResponseWriter, r *http.Request) {
 	s.tcpProxy.ClearTargetPort()
 	slog.Debug("Port unbound successfully")
 
-	resp := map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"message": "Port binding removed",
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	})
 }
 
 func (s *Server) deleteDirHandler(w http.ResponseWriter, r *http.Request) {
@@ -636,15 +622,12 @@ func (s *Server) deleteDirHandler(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Deleting directory", "path", req.Path)
 
 	err := os.RemoveAll(req.Path)
-	resp := map[string]interface{}{"success": err == nil}
 	if err != nil {
 		slog.Debug("Failed to delete directory", "path", req.Path, "error", err)
-		resp["error"] = err.Error()
 	} else {
 		slog.Debug("Directory deleted successfully", "path", req.Path)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeResult(w, err)
 }
 
 func (s *Server) makeDirHandler(w http.ResponseWriter, r *http.Request) {
@@ -657,15 +640,12 @@ func (s *Server) makeDirHandler(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Creating directory", "path", req.Path)
 
 	err := os.MkdirAll(req.Path, 0o755)
-	resp := map[string]interface{}{"success": err == nil}
 	if err != nil {
 		slog.Debug("Failed to create directory", "path", req.Path, "error", err)
-		resp["error"] = err.Error()
 	} else {
 		slog.Debug("Directory created successfully", "path", req.Path)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeResult(w, err)
 }
 
 func (s *Server) listDirHandler(w http.ResponseWriter, r *http.Request) {
@@ -689,8 +669,7 @@ func (s *Server) listDirHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		slog.Debug("Directory listed successfully", "path", req.Path, "entries", len(entries))
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) writeFileHandler(w http.ResponseWriter, r *http.Request) {
@@ -704,15 +683,12 @@ func (s *Server) writeFileHandler(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Writing file", "path", req.Path, "content_length", contentLen)
 
 	err := os.WriteFile(req.Path, []byte(req.Content), 0o644)
-	resp := map[string]interface{}{"success": err == nil}
 	if err != nil {
 		slog.Debug("Failed to write file", "path", req.Path, "error", err)
-		resp["error"] = err.Error()
 	} else {
 		slog.Debug("File written successfully", "path", req.Path, "bytes", contentLen)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeResult(w, err)
 }
 
 func (s *Server) readFileHandler(w http.ResponseWriter, r *http.Request) {
@@ -733,8 +709,7 @@ func (s *Server) readFileHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("File read successfully", "path", req.Path, "bytes", len(content))
 		resp.Content = string(content)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) deleteFileHandler(w http.ResponseWriter, r *http.Request) {
@@ -747,13 +722,10 @@ func (s *Server) deleteFileHandler(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Deleting file", "path", req.Path)
 
 	err := os.Remove(req.Path)
-	resp := map[string]interface{}{"success": err == nil}
 	if err != nil {
 		slog.Debug("Failed to delete file", "path", req.Path, "error", err)
-		resp["error"] = err.Error()
 	} else {
 		slog.Debug("File deleted successfully", "path", req.Path)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeResult(w, err)
 }
