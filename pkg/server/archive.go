@@ -384,7 +384,9 @@ func writeTarMember(tw *tar.Writer, p, rel string, fi fs.FileInfo,
 		return true, nil
 	}
 	if _, err := io.CopyBuffer(tw, f, buf); err != nil {
-		return false, err
+		// The header is already on the stream: the caller must treat this as
+		// a mid-stream cut, not as an error it can still answer with a status.
+		return true, err
 	}
 	return true, nil
 }

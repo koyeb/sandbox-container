@@ -791,6 +791,82 @@ func TestFilesArchivePutMissingParentEntries(t *testing.T) {
 	}
 }
 
+// goneWriter accepts writes up to limit bytes and then fails, like a client
+// that went away mid-download. It records whether a status was set after the
+// stream had already committed — the superfluous-WriteHeader case the net/http
+// server would log.
+type goneWriter struct {
+	limit    int
+	written  int
+	body     bytes.Buffer
+	hdr      http.Header
+	status   int
+	statused bool
+	cut      bool
+}
+
+func (w *goneWriter) Header() http.Header { return w.hdr }
+
+func (w *goneWriter) Write(p []byte) (int, error) {
+	if w.written+len(p) > w.limit {
+		w.cut = true
+		return 0, errors.New("client went away")
+	}
+	w.written += len(p)
+	return w.body.Write(p)
+}
+
+func (w *goneWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	// A status after content began is the superfluous call net/http logs.
+	if w.written > 0 {
+		w.statused = true
+	}
+}
+
+// A copy failure after the first member's header is committed — the client
+// hanging up mid-download — is a cut, not an error status: the stream can't
+// be answered with one anymore, and nothing may append an error body to it.
+func TestFilesArchiveGetWriteFailure(t *testing.T) {
+	_, mux := newTestServer(t)
+	dir := t.TempDir()
+	content := make([]byte, 1<<20)
+	rng := rand.New(rand.NewSource(2))
+	for i := range content {
+		content[i] = byte(rng.Int63())
+	}
+	os.WriteFile(filepath.Join(dir, "big.bin"), content, 0o644)
+
+	w := &goneWriter{hdr: http.Header{}, limit: 64 << 10}
+	mux.ServeHTTP(w, newAuthRequest(http.MethodGet, filesURL("/files/archive", dir), nil))
+
+	if !w.cut {
+		t.Fatal("the cut never happened")
+	}
+	if w.statused {
+		t.Error("a status was set after the stream had committed")
+	}
+	if bytes.Contains(w.body.Bytes(), []byte(`"error"`)) {
+		t.Error("an error body was appended to the committed stream")
+	}
+
+	// The mirror image: a write that fails before any byte is delivered
+	// (the gzip header itself) still gets a real error status.
+	gone := &goneWriter{hdr: http.Header{}, limit: 9}
+	mux.ServeHTTP(gone, newAuthRequest(http.MethodGet, filesURL("/files/archive", dir), nil))
+	if !gone.cut {
+		t.Fatal("the early write did not fail")
+	}
+	if gone.status != http.StatusInternalServerError {
+		t.Errorf("status %d, expected a clean 500 for an uncommitted stream", gone.status)
+	}
+	if gone.statused {
+		t.Error("a status was superfluous")
+	}
+}
+
 // assertTreeEqual compares the want tree against the got tree: same members
 // (unless subset, then want's members must be there), same file contents,
 // same modes, same mtimes, same link targets. The roots themselves are not
