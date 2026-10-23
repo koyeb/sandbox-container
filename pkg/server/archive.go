@@ -19,8 +19,9 @@ import (
 )
 
 // Archive routes: a directory's tree as a gzip'd tar, in both directions.
-// Each request streams with a single copy buffer, so memory stays flat no
-// matter the archive size.
+// Everything streams through io.Copy's pooled buffers, so memory stays flat
+// no matter the archive size. Hardlinked paths are archived as independent
+// copies: the extractor's hardlink support covers foreign archives.
 
 // ArchiveResult reports what a PUT /files/archive extracted.
 type ArchiveResult struct {
@@ -89,10 +90,10 @@ func (s *Server) putArchiveHandler(w http.ResponseWriter, r *http.Request) {
 		writeExtractError(w, err)
 		return
 	}
-	// Directory mtimes come last: writing entries into a directory bumps its
-	// mtime, so the archived one can only be restored once the contents are
-	// in place.
-	if err := restoreDirTimes(dirs); err != nil {
+	// Directory modes and mtimes come last: writing entries into a directory
+	// bumps its mtime, and a restrictive mode applied any earlier would lock
+	// the directory's own contents out of extraction.
+	if err := restoreDirs(dirs); err != nil {
 		writeExtractError(w, err)
 		return
 	}
@@ -105,8 +106,6 @@ func (s *Server) putArchiveHandler(w http.ResponseWriter, r *http.Request) {
 // collects the directories whose mtimes restoreDirTimes applies once the
 // whole archive is in place.
 func extractTar(tr *tar.Reader, root string) (res ArchiveResult, dirs []dirTime, err error) {
-	// The one copy buffer of the request: RSS stays flat regardless of size.
-	buf := make([]byte, 32*1024)
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -115,7 +114,7 @@ func extractTar(tr *tar.Reader, root string) (res ArchiveResult, dirs []dirTime,
 		if err != nil {
 			return res, dirs, err
 		}
-		dt, files, bytes, err := extractEntry(tr, root, hdr, buf)
+		dt, files, bytes, err := extractEntry(tr, root, hdr)
 		if err != nil {
 			return res, dirs, err
 		}
@@ -130,8 +129,7 @@ func extractTar(tr *tar.Reader, root string) (res ArchiveResult, dirs []dirTime,
 // extractEntry writes one member under root and reports what it extracted:
 // the dirTime to restore at the end when it made a directory, and the files
 // and bytes it wrote.
-func extractEntry(tr *tar.Reader, root string, hdr *tar.Header,
-	buf []byte) (*dirTime, int, int64, error) {
+func extractEntry(tr *tar.Reader, root string, hdr *tar.Header) (*dirTime, int, int64, error) {
 	name, err := cleanEntryName(hdr.Name)
 	if err != nil {
 		return nil, 0, 0, err
@@ -147,7 +145,7 @@ func extractEntry(tr *tar.Reader, root string, hdr *tar.Header,
 		dt, err := extractDirEntry(dest, hdr)
 		return dt, 0, 0, err
 	case tar.TypeReg:
-		n, err := extractFile(tr, dest, hdr, buf)
+		n, err := extractFile(tr, dest, hdr)
 		return nil, 1, n, err
 	case tar.TypeSymlink:
 		// The link is stored byte-identical to the archive; only its
@@ -166,15 +164,14 @@ func extractEntry(tr *tar.Reader, root string, hdr *tar.Header,
 	}
 }
 
-// extractDirEntry creates one directory with the archive's mode.
+// extractDirEntry creates one directory. Its archived mode is not applied
+// here: restoreDirs sets it after the contents, so a restrictive mode can't
+// lock them out of extraction.
 func extractDirEntry(dest string, hdr *tar.Header) (*dirTime, error) {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(dest, fs.FileMode(hdr.Mode&0o7777)); err != nil {
-		return nil, err
-	}
-	return &dirTime{path: dest, mtime: hdr.ModTime}, nil
+	return &dirTime{path: dest, mode: fs.FileMode(hdr.Mode & 0o7777), mtime: hdr.ModTime}, nil
 }
 
 // extractSymlink stores one link byte-identical to the archive, after
@@ -225,12 +222,12 @@ func resolveLinkTarget(name, target string) (string, error) {
 // extractFile streams one member into dest and then applies its mode and
 // mtime. The mode comes after the copy: the create mode goes through the
 // process's umask, the chmod doesn't.
-func extractFile(tr *tar.Reader, dest string, hdr *tar.Header, buf []byte) (int64, error) {
+func extractFile(tr *tar.Reader, dest string, hdr *tar.Header) (int64, error) {
 	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fs.FileMode(hdr.Mode&0o7777))
 	if err != nil {
 		return 0, err
 	}
-	n, copyErr := io.CopyBuffer(f, tr, buf)
+	n, copyErr := io.Copy(f, tr)
 	if closeErr := f.Close(); copyErr == nil {
 		copyErr = closeErr
 	}
@@ -245,17 +242,23 @@ func extractFile(tr *tar.Reader, dest string, hdr *tar.Header, buf []byte) (int6
 	return n, os.Chtimes(dest, hdr.ModTime, hdr.ModTime)
 }
 
-// dirTime is a directory whose mtime is restored after extraction.
+// dirTime is a directory whose mode and mtime are restored after
+// extraction, once its contents are in place.
 type dirTime struct {
 	path  string
+	mode  fs.FileMode
 	mtime time.Time
 }
 
-// restoreDirTimes applies the archive's directory mtimes, children before
-// parents: writing a directory's contents is what bumps its mtime.
-func restoreDirTimes(dirs []dirTime) error {
+// restoreDirs applies the archive's directory modes and mtimes, children
+// before parents: a restrictive mode lands after the directory's contents,
+// and the mtime after whatever bumped it.
+func restoreDirs(dirs []dirTime) error {
 	sort.Slice(dirs, func(i, j int) bool { return dirs[i].path > dirs[j].path })
 	for _, d := range dirs {
+		if err := os.Chmod(d.path, d.mode); err != nil {
+			return err
+		}
 		if err := os.Chtimes(d.path, d.mtime, d.mtime); err != nil {
 			return err
 		}
@@ -285,11 +288,9 @@ func (s *Server) getArchiveHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/gzip")
 	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)
-	// The one copy buffer of the request: RSS stays flat regardless of size.
-	buf := make([]byte, 32*1024)
 	entries := 0
 	err := filepath.WalkDir(walkRoot, func(p string, d fs.DirEntry, walkErr error) error {
-		emitted, err := writeArchiveEntry(tw, walkRoot, p, d, walkErr, excludes, buf)
+		emitted, err := writeArchiveEntry(tw, walkRoot, p, d, walkErr, excludes)
 		if emitted {
 			entries++
 		}
@@ -323,7 +324,7 @@ func (s *Server) getArchiveHandler(w http.ResponseWriter, r *http.Request) {
 // written. The root itself is not an entry; exclude patterns match any suffix
 // of the relative path, and a matching directory is skipped whole.
 func writeArchiveEntry(tw *tar.Writer, walkRoot, p string, d fs.DirEntry,
-	walkErr error, excludes []string, buf []byte) (emitted bool, err error) {
+	walkErr error, excludes []string) (emitted bool, err error) {
 	if walkErr != nil {
 		return false, walkErr
 	}
@@ -351,15 +352,14 @@ func writeArchiveEntry(tw *tar.Writer, walkRoot, p string, d fs.DirEntry,
 		slog.Debug("Skipping unarchivable file", "path", p, "type", fileType(fi.Mode()))
 		return false, nil
 	}
-	return writeTarMember(tw, p, rel, fi, buf)
+	return writeTarMember(tw, p, rel, fi)
 }
 
 // writeTarMember writes one tree member's header, and its content when it
 // is a regular file. Symlinks are archived as links, not followed. A
 // regular file is opened before its header is written, so an unreadable
 // one fails the request before any of its bytes reach the stream.
-func writeTarMember(tw *tar.Writer, p, rel string, fi fs.FileInfo,
-	buf []byte) (emitted bool, err error) {
+func writeTarMember(tw *tar.Writer, p, rel string, fi fs.FileInfo) (emitted bool, err error) {
 	var f *os.File
 	if fi.Mode().IsRegular() {
 		if f, err = os.Open(p); err != nil {
@@ -383,7 +383,7 @@ func writeTarMember(tw *tar.Writer, p, rel string, fi fs.FileInfo,
 	if f == nil {
 		return true, nil
 	}
-	if _, err := io.CopyBuffer(tw, f, buf); err != nil {
+	if _, err := io.Copy(tw, f); err != nil {
 		// The header is already on the stream: the caller must treat this as
 		// a mid-stream cut, not as an error it can still answer with a status.
 		return true, err

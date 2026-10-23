@@ -867,6 +867,45 @@ func TestFilesArchiveGetWriteFailure(t *testing.T) {
 	}
 }
 
+// A directory archived with a restrictive mode must not lock out its own
+// contents during extraction: the mode lands after them, like tar does.
+func TestFilesArchiveReadOnlyDirs(t *testing.T) {
+	_, mux := newTestServer(t)
+	src := t.TempDir()
+	ro := filepath.Join(src, "ro")
+	os.MkdirAll(ro, 0o755)
+	os.WriteFile(filepath.Join(ro, "f"), []byte("data"), 0o644)
+	at := time.Date(2022, 1, 2, 3, 4, 5, 0, time.UTC)
+	chTime(t, filepath.Join(ro, "f"), at)
+	if err := os.Chmod(ro, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(ro, 0o755) })
+	chTime(t, ro, at)
+
+	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files/archive", src), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET: %d", w.Code)
+	}
+	dst := t.TempDir()
+	w = serve(mux, newAuthRequest(http.MethodPut, filesURL("/files/archive", dst), w.Body.Bytes()))
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT of a read-only tree: %d: %q", w.Code, w.Body.String())
+	}
+	t.Cleanup(func() { os.Chmod(filepath.Join(dst, "ro"), 0o755) })
+
+	if got, err := os.ReadFile(filepath.Join(dst, "ro", "f")); err != nil || string(got) != "data" {
+		t.Errorf("ro/f: %q (%v)", got, err)
+	}
+	fi, err := os.Stat(filepath.Join(dst, "ro"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o500 || !fi.ModTime().Equal(at) {
+		t.Errorf("ro: mode %o mtime %v, want 0500 and %v", fi.Mode().Perm(), fi.ModTime(), at)
+	}
+}
+
 // assertTreeEqual compares the want tree against the got tree: same members
 // (unless subset, then want's members must be there), same file contents,
 // same modes, same mtimes, same link targets. The roots themselves are not
