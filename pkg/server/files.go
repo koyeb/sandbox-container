@@ -61,7 +61,7 @@ func fsErrorStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, fs.ErrPermission):
 		return http.StatusForbidden
-	case errors.Is(err, fs.ErrExist), errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.EISDIR), errors.Is(err, syscall.ENOTEMPTY):
+	case errors.Is(err, fs.ErrExist), errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.EISDIR), errors.Is(err, syscall.ENOTEMPTY), errors.Is(err, syscall.ELOOP):
 		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
@@ -208,7 +208,11 @@ func (s *Server) putFileHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	path = writeTarget(path)
+	path, err := writeTarget(path)
+	if err != nil {
+		writeFSError(w, err)
+		return
+	}
 	if info, err := os.Stat(path); err == nil {
 		if info.IsDir() {
 			writeFileError(w, http.StatusConflict, fmt.Sprintf("%s is a directory", path))
@@ -281,24 +285,29 @@ func (s *Server) putFileHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeTarget follows symlinks at path, as /write_file does, rather than
-// replacing the link, including a link whose target doesn't exist yet.
-func writeTarget(path string) string {
-	// 40 hops, the kernel's limit: past it, the loop is left to fail as ELOOP.
+// replacing the link, including a link whose target doesn't exist yet. A
+// chain longer than the kernel's limit resolves to no file: fail the way
+// the kernel would, instead of overwriting the last link.
+func writeTarget(path string) (string, error) {
+	// 40 hops, the kernel's limit.
 	for range 40 {
 		info, err := os.Lstat(path)
 		if err != nil || info.Mode()&fs.ModeSymlink == 0 {
-			return path
+			return path, nil
 		}
 		target, err := os.Readlink(path)
 		if err != nil {
-			return path
+			return path, nil
 		}
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(path), target)
 		}
 		path = target
 	}
-	return path
+	if info, err := os.Lstat(path); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		return "", &fs.PathError{Op: "write", Path: path, Err: syscall.ELOOP}
+	}
+	return path, nil
 }
 
 // commitTempFile makes tmp durable with mode and renames it to path.
