@@ -95,19 +95,6 @@ func decodeRanges(t *testing.T, w *httptest.ResponseRecorder) []uploadSpan {
 	return resp.Ranges
 }
 
-func expectUploadError(t *testing.T, w *httptest.ResponseRecorder, status int) {
-	t.Helper()
-	if w.Code != status {
-		t.Fatalf("expected %d, got %d: %s", status, w.Code, w.Body.String())
-	}
-	var resp struct {
-		Error string `json:"error"`
-	}
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil || resp.Error == "" {
-		t.Fatalf("expected a JSON error body, got %q (%v)", w.Body.String(), err)
-	}
-}
-
 func markerPathOf(srv *Server, id string) string {
 	return filepath.Join(srv.uploads.dir, id)
 }
@@ -316,8 +303,14 @@ func TestUploadsPartTooLarge(t *testing.T) {
 	}
 
 	// A part that would write past the upload size is refused even when small,
-	// with and without a declared length.
+	// with and without a declared length, and by the length check itself
+	// even when fewer bytes actually arrive.
 	id2 := openUpload(t, mux, map[string]any{"path": path + "2", "size": 100})
+	req = newAuthRequest(http.MethodPut, "/files/uploads/"+id2+"?offset=90", []byte("zz"))
+	req.ContentLength = 20
+	if w := serve(mux, req); w.Code != http.StatusBadRequest {
+		t.Fatalf("short body, declared past size: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
 	if w := putUploadPart(mux, id2, 90, bytes.Repeat([]byte("z"), 20), ""); w.Code != http.StatusBadRequest {
 		t.Fatalf("part past size: expected 400, got %d: %s", w.Code, w.Body.String())
 	}
@@ -332,6 +325,15 @@ func TestUploadsPartTooLarge(t *testing.T) {
 	}
 	if ranges := decodeRanges(t, uploadStatus(mux, id2)); len(ranges) != 0 {
 		t.Fatalf("refused parts recorded ranges: %v", ranges)
+	}
+
+	// With nothing recorded, complete reports the whole file missing.
+	w := completeUpload(mux, id2)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("complete with no parts: expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if missing := decodeRanges(t, w); len(missing) != 1 || missing[0] != (uploadSpan{Start: 0, End: 100}) {
+		t.Fatalf("missing = %v, want the whole file", missing)
 	}
 }
 
@@ -470,6 +472,7 @@ func TestUploadsValidation(t *testing.T) {
 		{"bad mode", map[string]any{"path": "/tmp/f", "size": 1, "mode": "0999"}, http.StatusBadRequest},
 		{"bad mode prefix", map[string]any{"path": "/tmp/f", "size": 1, "mode": "0644 "}, http.StatusBadRequest},
 		{"bad sha256", map[string]any{"path": "/tmp/f", "size": 1, "sha256": "nothex"}, http.StatusBadRequest},
+		{"short sha256", map[string]any{"path": "/tmp/f", "size": 1, "sha256": "a1b2c3"}, http.StatusBadRequest},
 		{"destination is a directory", map[string]any{"path": filepath.Join(dir, "d"), "size": 1}, http.StatusConflict},
 		{"missing parent", map[string]any{"path": filepath.Join(dir, "no", "f"), "size": 1}, http.StatusNotFound},
 	}
