@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -111,12 +110,7 @@ func (pm *ProcessManager) StartProcess(command, cwd string, env map[string]strin
 		cmd.Dir = cwd
 	}
 
-	if len(env) > 0 {
-		cmd.Env = os.Environ()
-		for key, value := range env {
-			cmd.Env = append(cmd.Env, key+"="+value)
-		}
-	}
+	cmd.Env = commandEnv(env)
 
 	process := &Process{
 		ID:        id,
@@ -303,7 +297,7 @@ func (pm *ProcessManager) GetProcessLogs(id string) ([]LogEntry, error) {
 	allLogs = append(allLogs, stdoutLogs...)
 	allLogs = append(allLogs, stderrLogs...)
 
-	// Sort by timestamp
+	// Each stream stays in order; the two streams are not interleaved by time.
 	return allLogs, nil
 }
 

@@ -35,6 +35,47 @@ func writeResult(w http.ResponseWriter, err error) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// commandEnv returns the environment a command runs with: the current one
+// plus the request's additions. nil means inherit unchanged.
+func commandEnv(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	e := os.Environ()
+	for key, value := range env {
+		e = append(e, key+"="+value)
+	}
+	return e
+}
+
+// checkCwd answers the request with a 400 when cwd is not a usable working
+// directory; an empty cwd means the command's default.
+func checkCwd(w http.ResponseWriter, cwd string) bool {
+	if cwd == "" {
+		return true
+	}
+	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+		http.Error(w, fmt.Sprintf("Invalid working directory: %s", cwd), http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// cancelProcessGroup returns the Cancel that kills a command's whole
+// process group when its context ends, so children can't outlive it holding
+// pipes open.
+func cancelProcessGroup(cmd *exec.Cmd) func() error {
+	return func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		return nil
+	}
+}
+
 // sseWriter provides thread-safe writing for Server-Sent Events
 type sseWriter struct {
 	w        http.ResponseWriter
@@ -160,11 +201,8 @@ func (s *Server) runHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Cwd != "" {
-		if info, err := os.Stat(req.Cwd); err != nil || !info.IsDir() {
-			http.Error(w, fmt.Sprintf("Invalid working directory: %s", req.Cwd), http.StatusBadRequest)
-			return
-		}
+	if !checkCwd(w, req.Cwd) {
+		return
 	}
 
 	slog.Debug("Executing command", "cmd", req.Cmd, "cwd", req.Cwd, "env", req.Env)
@@ -174,22 +212,14 @@ func (s *Server) runHandler(w http.ResponseWriter, r *http.Request) {
 	// running and holding the output pipes open, so Wait would not return.
 	cmd := exec.CommandContext(r.Context(), "sh", "-c", req.Cmd)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	cmd.Cancel = cancelProcessGroup(cmd)
 
 	// Set working directory if provided
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	}
 
-	// Set environment variables if provided
-	if len(req.Env) > 0 {
-		cmd.Env = os.Environ()
-		for key, value := range req.Env {
-			cmd.Env = append(cmd.Env, key+"="+value)
-		}
-	}
+	cmd.Env = commandEnv(req.Env)
 
 	// Let os/exec drain stdout and stderr concurrently: reading one pipe to EOF
 	// before the other deadlocks once the command fills the other pipe's buffer.
@@ -254,11 +284,8 @@ func (s *Server) startProcessHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Cwd != "" {
-		if info, err := os.Stat(req.Cwd); err != nil || !info.IsDir() {
-			http.Error(w, fmt.Sprintf("Invalid working directory: %s", req.Cwd), http.StatusBadRequest)
-			return
-		}
+	if !checkCwd(w, req.Cwd) {
+		return
 	}
 
 	slog.Debug("Start process request", "cmd", req.Cmd, "cwd", req.Cwd, "env", req.Env)
@@ -405,11 +432,8 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Cwd != "" {
-		if info, err := os.Stat(req.Cwd); err != nil || !info.IsDir() {
-			http.Error(w, fmt.Sprintf("Invalid working directory: %s", req.Cwd), http.StatusBadRequest)
-			return
-		}
+	if !checkCwd(w, req.Cwd) {
+		return
 	}
 
 	slog.Debug("Executing streaming command", "cmd", req.Cmd, "cwd", req.Cwd, "env", req.Env)
@@ -435,28 +459,14 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", req.Cmd)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = streamingCommandWaitDelay
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return os.ErrProcessDone
-		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-			return err
-		}
-		return nil
-	}
+	cmd.Cancel = cancelProcessGroup(cmd)
 
 	// Set working directory if provided
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	}
 
-	// Set environment variables if provided
-	if len(req.Env) > 0 {
-		cmd.Env = os.Environ()
-		for key, value := range req.Env {
-			cmd.Env = append(cmd.Env, key+"="+value)
-		}
-	}
+	cmd.Env = commandEnv(req.Env)
 
 	// Hand os/exec io.Writers rather than StdoutPipe/StderrPipe: Wait then drains the
 	// pipes to EOF before returning, so no output is lost, and WaitDelay bounds that
