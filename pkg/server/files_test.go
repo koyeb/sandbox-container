@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -444,6 +445,49 @@ func TestFilesGetSocket(t *testing.T) {
 	}
 	defer ln.Close()
 	expectError(t, serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", sock), nil)), http.StatusBadRequest)
+}
+
+// A symlink chain longer than the kernel's limit fails the way the kernel
+// would, instead of silently overwriting one of the links.
+func TestFilesPutSymlinkChainTooLong(t *testing.T) {
+	_, mux := newTestServer(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "file")
+
+	// 41 links: resolving the outermost is one hop too many.
+	tooLong := target
+	for i := 1; i <= 41; i++ {
+		p := filepath.Join(dir, fmt.Sprintf("a%d", i))
+		if err := os.Symlink(tooLong, p); err != nil {
+			t.Fatal(err)
+		}
+		tooLong = p
+	}
+	expectError(t, putFile(t, mux, tooLong, []byte("new")), http.StatusConflict)
+	if fi, err := os.Lstat(filepath.Join(dir, "a1")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the last link of the chain was replaced")
+	}
+	if tmp := listTempFiles(t, dir); len(tmp) != 0 {
+		t.Errorf("temp files left behind: %v", tmp)
+	}
+
+	// A chain within the limit still writes through to the target — also
+	// when the target already exists, so the chain resolves to a real file.
+	os.WriteFile(target, []byte("old"), 0o644)
+	within := target
+	for i := 1; i <= 40; i++ {
+		p := filepath.Join(dir, fmt.Sprintf("b%d", i))
+		if err := os.Symlink(within, p); err != nil {
+			t.Fatal(err)
+		}
+		within = p
+	}
+	if w := putFile(t, mux, within, []byte("ok")); w.Code != http.StatusOK {
+		t.Fatalf("40-hop chain: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got, _ := os.ReadFile(target); string(got) != "ok" {
+		t.Errorf("target holds %q", got)
+	}
 }
 
 // stat reports special files as type "other": it stats them, and never
