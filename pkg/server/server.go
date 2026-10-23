@@ -13,6 +13,7 @@ type Server struct {
 	auth           *authState
 	tcpProxy       *TCPProxy
 	processManager *ProcessManager
+	uploads        *uploadStore
 }
 
 func New(authConfig AuthConfig) (*Server, error) {

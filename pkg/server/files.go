@@ -29,6 +29,7 @@ func (s *Server) registerFileRoutes(mux *http.ServeMux) {
 	mux.Handle("PUT /files", s.authMiddleware(http.HandlerFunc(s.putFileHandler)))
 	mux.Handle("GET /files/stat", s.authMiddleware(http.HandlerFunc(s.statFileHandler)))
 	mux.Handle("GET /files/list", s.authMiddleware(http.HandlerFunc(s.listFilesHandler)))
+	s.registerUploadRoutes(mux)
 }
 
 type PutFileResponse struct {
