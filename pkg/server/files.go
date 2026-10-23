@@ -190,13 +190,13 @@ func (s *Server) putFileHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	mode, modeSet, parents, wantSum, err := parsePutParams(r)
+	pp, err := parsePutParams(r)
 	if err != nil {
 		writeFileError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	dir, name, mode, err := resolvePutTarget(path, mode, modeSet, parents)
+	dir, name, mode, err := resolvePutTarget(path, pp)
 	if err != nil {
 		slog.Debug("Failed to prepare destination", "path", path, "error", err)
 		writeFSError(w, err)
@@ -220,8 +220,8 @@ func (s *Server) putFileHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	if wantSum != "" && sum != wantSum {
-		writeFileError(w, http.StatusBadRequest, fmt.Sprintf("sha256 mismatch: got %s, expected %s", sum, wantSum))
+	if pp.wantSum != "" && sum != pp.wantSum {
+		writeFileError(w, http.StatusBadRequest, fmt.Sprintf("sha256 mismatch: got %s, expected %s", sum, pp.wantSum))
 		return
 	}
 
@@ -237,25 +237,33 @@ func (s *Server) putFileHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(PutFileResponse{Size: size, SHA256: sum})
 }
 
+// putParams carries a PUT's optional parameters from their parsing to the
+// destination resolution.
+type putParams struct {
+	mode    fs.FileMode
+	modeSet bool
+	parents bool
+	wantSum string
+}
+
 // parsePutParams validates the optional mode, parents and X-Content-SHA256
 // of a PUT. mode is the default 0644 unless mode= was given.
-func parsePutParams(r *http.Request) (mode fs.FileMode, modeSet, parents bool, wantSum string, err error) {
-	mode = 0o644
-	parents = r.URL.Query().Get("parents") == "1"
+func parsePutParams(r *http.Request) (putParams, error) {
+	p := putParams{mode: 0o644, parents: r.URL.Query().Get("parents") == "1"}
 	if m := r.URL.Query().Get("mode"); m != "" {
 		v, err := strconv.ParseUint(m, 8, 32)
 		if err != nil || v > 0o777 {
-			return 0, false, false, "", errors.New("mode must be octal permission bits, e.g. 0644")
+			return putParams{}, errors.New("mode must be octal permission bits, e.g. 0644")
 		}
-		mode, modeSet = fs.FileMode(v), true
+		p.mode, p.modeSet = fs.FileMode(v), true
 	}
-	wantSum = strings.ToLower(r.Header.Get("X-Content-SHA256"))
-	if wantSum != "" {
-		if b, err := hex.DecodeString(wantSum); err != nil || len(b) != sha256.Size {
-			return 0, false, false, "", errors.New("X-Content-SHA256 must be 64 hex characters")
+	p.wantSum = strings.ToLower(r.Header.Get("X-Content-SHA256"))
+	if p.wantSum != "" {
+		if b, err := hex.DecodeString(p.wantSum); err != nil || len(b) != sha256.Size {
+			return putParams{}, errors.New("X-Content-SHA256 must be 64 hex characters")
 		}
 	}
-	return mode, modeSet, parents, wantSum, nil
+	return p, nil
 }
 
 // resolvePutTarget follows symlinks at path (as /write_file does), carries an
@@ -263,29 +271,30 @@ func parsePutParams(r *http.Request) (mode fs.FileMode, modeSet, parents bool, w
 // parent directories when parents was requested. It returns the directory to
 // create the temp file in, the destination's file name, and the mode to commit
 // with.
-func resolvePutTarget(path string, mode fs.FileMode, modeSet, parents bool) (dir, name string, effMode fs.FileMode, err error) {
+func resolvePutTarget(path string, pp putParams) (dir, name string, effMode fs.FileMode, err error) {
 	path, err = writeTarget(path)
 	if err != nil {
 		return "", "", 0, err
 	}
-	if info, err := os.Stat(path); err == nil {
+	effMode = pp.mode
+	if info, statErr := os.Stat(path); statErr == nil {
 		if info.IsDir() {
 			return "", "", 0, &fs.PathError{Op: "put", Path: path, Err: errDestIsDir}
 		}
-		if !modeSet {
-			mode = info.Mode().Perm()
+		if !pp.modeSet {
+			effMode = info.Mode().Perm()
 		}
 	}
 	dir, name = filepath.Split(path)
 	if dir == "" {
 		dir = "."
 	}
-	if parents {
+	if pp.parents {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return "", "", 0, err
 		}
 	}
-	return dir, name, mode, nil
+	return dir, name, effMode, nil
 }
 
 // writeReceiveError classifies a failed receive: a read error means the
