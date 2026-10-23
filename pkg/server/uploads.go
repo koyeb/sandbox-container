@@ -90,10 +90,11 @@ type uploadSession struct {
 	lastPart time.Time
 }
 
-// uploadStore holds the live sessions. mu guards the map and every session
-// field, and is taken only by the store's own methods: part file I/O happens
-// outside it, so parts stream in parallel. The brief Close/Remove of a
-// session's terminal cleanup does run under it.
+// uploadStore holds the live sessions. mu is taken only by the store's own
+// methods and guards the map plus the mutable session fields (spans,
+// lastPart); the rest of a session is immutable after open. Part file I/O
+// happens outside the lock, so parts stream in parallel; the brief
+// Close/Remove of a session's terminal cleanup does run under it.
 type uploadStore struct {
 	mu       sync.Mutex
 	sessions map[string]*uploadSession
@@ -124,6 +125,7 @@ func newUploadStore(dir string) *uploadStore {
 func (st *uploadStore) sweepMarkers() {
 	entries, err := os.ReadDir(st.dir)
 	if err != nil {
+		slog.Debug("Failed to read upload markers directory", "path", st.dir, "error", err)
 		return
 	}
 	for _, e := range entries {
@@ -133,7 +135,9 @@ func (st *uploadStore) sweepMarkers() {
 				slog.Debug("Failed to sweep upload temp file", "path", string(tmp), "error", err)
 			}
 		}
-		os.Remove(marker)
+		if err := os.Remove(marker); err != nil {
+			slog.Debug("Failed to remove upload marker", "path", marker, "error", err)
+		}
 	}
 }
 
@@ -217,6 +221,19 @@ func (st *uploadStore) receivedSpans(sess *uploadSession) []uploadSpan {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return slices.Clone(sess.spans)
+}
+
+// abort removes the session named by id along with its temp file and
+// marker. nil means no such session was live.
+func (st *uploadStore) abort(id string) *uploadSession {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	sess, ok := st.liveSessionLocked(id)
+	if !ok {
+		return nil
+	}
+	st.removeLocked(sess)
+	return sess
 }
 
 // claimForCompletion retires the session when its parts cover [0, size),
@@ -617,14 +634,8 @@ func (s *Server) completeUploadHandler(w http.ResponseWriter, r *http.Request) {
 
 // abortUploadHandler aborts the session and removes its temp file.
 func (s *Server) abortUploadHandler(w http.ResponseWriter, r *http.Request) {
-	st := s.uploads
-	st.mu.Lock()
-	sess, ok := st.liveSessionLocked(r.PathValue("id"))
-	if ok {
-		st.removeLocked(sess)
-	}
-	st.mu.Unlock()
-	if !ok {
+	sess := s.uploads.abort(r.PathValue("id"))
+	if sess == nil {
 		writeFileError(w, http.StatusNotFound, "unknown upload session")
 		return
 	}
