@@ -35,8 +35,8 @@ import (
 // startup.
 
 const (
-	// maxUploadPartSize is the largest part accepted (design D2: the
-	// 100 MiB cloud-runtime request cap).
+	// maxUploadPartSize is the largest part accepted: the 100 MiB request
+	// cap of the cloud-runtime hop in front of this executor.
 	maxUploadPartSize = 100 << 20
 	// uploadSessionTTL is how long a session lives without a part.
 	uploadSessionTTL = time.Hour
@@ -93,8 +93,10 @@ type uploadSession struct {
 // uploadStore holds the live sessions. mu is taken only by the store's own
 // methods and guards the map plus the mutable session fields (spans,
 // lastPart); the rest of a session is immutable after open. Part file I/O
-// happens outside the lock, so parts stream in parallel; the brief
-// Close/Remove of a session's terminal cleanup does run under it.
+// happens outside the lock, so parts stream in parallel. The brief
+// Close/Remove of terminal cleanup runs under it on the expiry and abort
+// paths; once complete has retired a session the discard runs lock-free,
+// with the session already off the map.
 type uploadStore struct {
 	mu       sync.Mutex
 	sessions map[string]*uploadSession
