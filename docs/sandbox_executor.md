@@ -420,7 +420,8 @@ answers:
 `files` counts regular files and hardlinks, `bytes` the content bytes written.
 
 - Every member name must stay inside `<dir>` after cleaning: absolute names, `..` and links whose
-  resolved target leaves the directory are refused with `400` — a refused member leaves nothing behind
+  resolved target leaves the directory are refused with `400` — the refused member itself is never
+  created (its parent directories may already have been, and members before it stay)
 - Modes and mtimes are kept (directory modes and mtimes are applied after the directory's contents,
   like tar); symlinks are stored byte-identical to the archive, but a symlink's mtime cannot be
   restored — the standard library has no way to set it
