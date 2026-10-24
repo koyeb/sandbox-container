@@ -198,6 +198,12 @@ func (pm *ProcessManager) captureOutput(process *Process, pipe io.Reader, stream
 		}
 		process.logsMu.RUnlock()
 	}
+
+	// A line over the buffer limit ends the scan silently otherwise: that
+	// stream's logs would just stop with no trace.
+	if err := scanner.Err(); err != nil {
+		slog.Debug("Process log capture stopped", "id", process.ID, "stream", stream, "error", err)
+	}
 }
 
 // waitForCompletion waits for the process to complete and updates its status
