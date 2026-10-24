@@ -105,7 +105,7 @@ func (s *Server) putArchiveHandler(w http.ResponseWriter, r *http.Request) {
 // extractTar walks the tar stream, writing each entry under root. dirs
 // collects the directories whose mtimes restoreDirTimes applies once the
 // whole archive is in place.
-func extractTar(tr *tar.Reader, root string) (res ArchiveResult, dirs []dirTime, err error) {
+func extractTar(tr *tar.Reader, root string) (res ArchiveResult, dirs []dirRestore, err error) {
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -127,9 +127,9 @@ func extractTar(tr *tar.Reader, root string) (res ArchiveResult, dirs []dirTime,
 }
 
 // extractEntry writes one member under root and reports what it extracted:
-// the dirTime to restore at the end when it made a directory, and the files
+// the dirRestore to restore at the end when it made a directory, and the files
 // and bytes it wrote.
-func extractEntry(tr *tar.Reader, root string, hdr *tar.Header) (*dirTime, int, int64, error) {
+func extractEntry(tr *tar.Reader, root string, hdr *tar.Header) (*dirRestore, int, int64, error) {
 	name, err := cleanEntryName(hdr.Name)
 	if err != nil {
 		return nil, 0, 0, err
@@ -180,7 +180,7 @@ func prepareMemberDest(root, name string) (string, error) {
 // extractDirEntry creates one directory. Its archived mode is not applied
 // here: restoreDirs sets it after the contents, so a restrictive mode can't
 // lock them out of extraction.
-func extractDirEntry(dest string, hdr *tar.Header) (*dirTime, error) {
+func extractDirEntry(dest string, hdr *tar.Header) (*dirRestore, error) {
 	// MkdirAll would follow a link at dest and merge into its target.
 	if info, err := os.Lstat(dest); err == nil && info.Mode()&fs.ModeSymlink != 0 {
 		return nil, &fs.PathError{Op: "extract", Path: dest, Err: fs.ErrExist}
@@ -188,7 +188,7 @@ func extractDirEntry(dest string, hdr *tar.Header) (*dirTime, error) {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return nil, err
 	}
-	return &dirTime{path: dest, mode: fs.FileMode(hdr.Mode & 0o7777), mtime: hdr.ModTime}, nil
+	return &dirRestore{path: dest, mode: fs.FileMode(hdr.Mode & 0o7777), mtime: hdr.ModTime}, nil
 }
 
 // extractSymlink stores one link byte-identical to the archive, after
@@ -301,9 +301,9 @@ func extractFile(tr *tar.Reader, dest string, hdr *tar.Header) (int64, error) {
 	return n, os.Chtimes(dest, hdr.ModTime, hdr.ModTime)
 }
 
-// dirTime is a directory whose mode and mtime are restored after
+// dirRestore is a directory whose mode and mtime are restored after
 // extraction, once its contents are in place.
-type dirTime struct {
+type dirRestore struct {
 	path  string
 	mode  fs.FileMode
 	mtime time.Time
@@ -312,7 +312,7 @@ type dirTime struct {
 // restoreDirs applies the archive's directory modes and mtimes, children
 // before parents: a restrictive mode lands after the directory's contents,
 // and the mtime after whatever bumped it.
-func restoreDirs(dirs []dirTime) error {
+func restoreDirs(dirs []dirRestore) error {
 	sort.Slice(dirs, func(i, j int) bool { return dirs[i].path > dirs[j].path })
 	for _, d := range dirs {
 		if err := os.Chmod(d.path, d.mode); err != nil {
