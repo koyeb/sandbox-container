@@ -421,7 +421,7 @@ func writeArchiveEntry(tw *tar.Writer, walkRoot, p string, d fs.DirEntry,
 func writeTarMember(tw *tar.Writer, p, rel string, fi fs.FileInfo) (emitted bool, err error) {
 	var f *os.File
 	if fi.Mode().IsRegular() {
-		if f, err = os.Open(p); err != nil {
+		if f, err = openRegularChecked(p); err != nil {
 			return false, err
 		}
 		defer f.Close()
@@ -448,6 +448,26 @@ func writeTarMember(tw *tar.Writer, p, rel string, fi fs.FileInfo) (emitted bool
 		return true, err
 	}
 	return true, nil
+}
+
+// openRegularChecked opens p, refusing anything that is not a regular
+// file at the moment of the open: the walk's Info can go stale mid-walk, and
+// a file swapped for a writer-less FIFO would block the copy forever.
+func openRegularChecked(p string) (*os.File, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, notRegularError{path: p, kind: fileType(info.Mode())}
+	}
+	return f, nil
 }
 
 // excluded reports whether any pattern matches rel or one of its suffixes
