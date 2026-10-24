@@ -138,7 +138,7 @@ func TestRunStreamingHandlerLongOutput(t *testing.T) {
 
 	// Parse SSE events and sum up stdout data lengths.
 	total := 0
-	for _, line := range strings.Split(w.Body.String(), "\n") {
+	for line := range strings.SplitSeq(w.Body.String(), "\n") {
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
@@ -166,7 +166,7 @@ func TestRunStreamingHandlerCarriageReturnProgress(t *testing.T) {
 		"Receiving objects: 100%",
 	}
 	got := make([]string, 0, len(want))
-	for _, line := range strings.Split(w.Body.String(), "\n") {
+	for line := range strings.SplitSeq(w.Body.String(), "\n") {
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
@@ -198,7 +198,7 @@ func streamingEvents(t *testing.T, mux http.Handler, cmd, stream string) ([]stri
 	var lines []string
 	var complete map[string]any
 	event := ""
-	for _, line := range strings.Split(w.Body.String(), "\n") {
+	for line := range strings.SplitSeq(w.Body.String(), "\n") {
 		if name, ok := strings.CutPrefix(line, "event: "); ok {
 			event = name
 			continue
@@ -372,5 +372,72 @@ func TestRunStreamingInvalidCwd(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 Bad Request, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// The JSON file routes answer 200 with {"success": bool, "error": ...} — old
+// clients read the envelope, not the status code.
+func TestWriteFileEnvelope(t *testing.T) {
+	_, mux := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "f")
+
+	body, _ := json.Marshal(WriteFileRequest{Path: path, Content: "hi"})
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/write_file", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("success: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("success body: %v (%q)", err, w.Body.String())
+	}
+	if resp["success"] != true {
+		t.Errorf("success body: %v", resp)
+	}
+
+	body, _ = json.Marshal(WriteFileRequest{Path: filepath.Join(path, "sub", "f"), Content: "hi"})
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/write_file", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("error: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("error body: %v (%q)", err, w.Body.String())
+	}
+	if resp["success"] != false || resp["error"] == "" {
+		t.Errorf("error body: %v", resp)
+	}
+}
+
+// /read_file answers 200 with {"content"} or {"error"}, never a bare status.
+func TestReadFileEnvelope(t *testing.T) {
+	_, mux := newTestServer(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f")
+	os.WriteFile(path, []byte("hi"), 0o644)
+
+	body, _ := json.Marshal(ReadFileRequest{Path: path})
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/read_file", body))
+	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("read: %d %v", w.Code, w.Header())
+	}
+	var resp ReadFileResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if resp.Content != "hi" || resp.Error != "" {
+		t.Errorf("read body: %+v", resp)
+	}
+
+	body, _ = json.Marshal(ReadFileRequest{Path: filepath.Join(dir, "missing")})
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/read_file", body))
+	var errResp ReadFileResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("read-error body: %v", err)
+	}
+	if w.Code != http.StatusOK || errResp.Error == "" || errResp.Content != "" {
+		t.Errorf("read-error: %d %+v", w.Code, errResp)
 	}
 }
