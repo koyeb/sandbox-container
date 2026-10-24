@@ -1009,6 +1009,40 @@ func TestFilesArchivePutExistingDestinations(t *testing.T) {
 			},
 		},
 		{
+			name: "a hardlink through a symlinked parent",
+			want: http.StatusConflict,
+			entry: []tar.Header{
+				{Name: "h", Typeflag: tar.TypeLink, Linkname: "s1/secret", Mode: 0o644},
+			},
+			prep: func(t *testing.T, dest string) {
+				os.MkdirAll(filepath.Join(filepath.Dir(dest), "out"), 0o755)
+				os.WriteFile(filepath.Join(filepath.Dir(dest), "out", "secret"), []byte("x"), 0o600)
+				os.Symlink(filepath.Join("..", "out"), filepath.Join(dest, "s1"))
+			},
+			check: func(t *testing.T, dest string) {
+				if _, err := os.Lstat(filepath.Join(dest, "h")); !errors.Is(err, os.ErrNotExist) {
+					t.Error("the hardlink aliased a file outside the archive root")
+				}
+			},
+		},
+		{
+			name: "a hardlink onto a symlinked target",
+			want: http.StatusConflict,
+			entry: []tar.Header{
+				{Name: "h", Typeflag: tar.TypeLink, Linkname: "l", Mode: 0o644},
+			},
+			prep: func(t *testing.T, dest string) {
+				os.MkdirAll(filepath.Join(filepath.Dir(dest), "out"), 0o755)
+				os.WriteFile(filepath.Join(filepath.Dir(dest), "out", "secret"), []byte("x"), 0o600)
+				os.Symlink(filepath.Join("..", "out", "secret"), filepath.Join(dest, "l"))
+			},
+			check: func(t *testing.T, dest string) {
+				if _, err := os.Lstat(filepath.Join(dest, "h")); !errors.Is(err, os.ErrNotExist) {
+					t.Error("the hardlink aliased a file outside the archive root")
+				}
+			},
+		},
+		{
 			name: "a symlink member over an existing file",
 			want: http.StatusOK,
 			entry: []tar.Header{

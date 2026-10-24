@@ -209,10 +209,20 @@ func extractHardlink(root, dest string, hdr *tar.Header) error {
 	if err != nil {
 		return err
 	}
+	// link(2) follows symlinks in the target's components — on BSD even
+	// the final one — so the target path gets the same guards as a member's
+	// own: never through a link.
+	if err := inTheWay(root, target); err != nil {
+		return err
+	}
+	targetPath := filepath.Join(root, filepath.FromSlash(target))
+	if info, err := os.Lstat(targetPath); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		return &fs.PathError{Op: "link", Path: targetPath, Err: fs.ErrExist}
+	}
 	if err := clearMemberPath(dest); err != nil {
 		return err
 	}
-	return os.Link(filepath.Join(root, filepath.FromSlash(target)), dest)
+	return os.Link(targetPath, dest)
 }
 
 // cleanEntryName validates a tar entry name: relative, and staying inside
