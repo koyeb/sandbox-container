@@ -1000,7 +1000,8 @@ func TestFilesArchivePutExistingDestinations(t *testing.T) {
 				os.Symlink("target", filepath.Join(dest, "evil"))
 			},
 			check: func(t *testing.T, dest string) {
-				if fi, err := os.Lstat(filepath.Join(dest, "evil")); err != nil || fi.Mode()&fs.ModeSymlink != 0 {
+				fi, err := os.Lstat(filepath.Join(dest, "evil"))
+				if err != nil || fi.Mode()&fs.ModeSymlink != 0 {
 					t.Errorf("the member was written through the link: %v", err)
 				}
 				if got, _ := os.ReadFile(filepath.Join(dest, "evil")); string(got) != "replaced" {
@@ -1043,6 +1044,18 @@ func TestFilesArchivePutExistingDestinations(t *testing.T) {
 			},
 		},
 		{
+			name: "a hardlink onto a directory",
+			want: http.StatusConflict,
+			entry: []tar.Header{
+				{Name: "h", Typeflag: tar.TypeLink, Linkname: "", Mode: 0o644},
+			},
+			check: func(t *testing.T, dest string) {
+				if _, err := os.Lstat(filepath.Join(dest, "h")); !errors.Is(err, os.ErrNotExist) {
+					t.Error("the hardlink to a directory was created")
+				}
+			},
+		},
+		{
 			name: "a symlink member over an existing file",
 			want: http.StatusOK,
 			entry: []tar.Header{
@@ -1064,7 +1077,9 @@ func TestFilesArchivePutExistingDestinations(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dest := t.TempDir()
-			c.prep(t, dest)
+			if c.prep != nil {
+				c.prep(t, dest)
+			}
 			body := craftTarGz(t, c.entry, c.body)
 			w := serve(mux, newAuthRequest(http.MethodPut, filesURL("/files/archive", dest), body))
 			if w.Code != c.want {

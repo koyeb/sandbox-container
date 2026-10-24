@@ -216,7 +216,10 @@ func extractHardlink(root, dest string, hdr *tar.Header) error {
 		return err
 	}
 	targetPath := filepath.Join(root, filepath.FromSlash(target))
-	if info, err := os.Lstat(targetPath); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+	// A directory target is the root itself when Linkname was empty or
+	// ".": not a member, and link(2) can't take one anyway.
+	if info, err := os.Lstat(targetPath); err == nil &&
+		(info.Mode()&fs.ModeSymlink != 0 || info.IsDir()) {
 		return &fs.PathError{Op: "link", Path: targetPath, Err: fs.ErrExist}
 	}
 	if err := clearMemberPath(dest); err != nil {
