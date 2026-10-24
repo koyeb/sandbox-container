@@ -125,7 +125,7 @@ func (s *sseWriter) writeEvent(event, data string) {
 	}
 }
 
-func (s *sseWriter) writeEventf(event, format string, args ...interface{}) {
+func (s *sseWriter) writeEventf(event, format string, args ...any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fmt.Fprintf(s.w, "event: %s\ndata: ", event)
@@ -309,7 +309,7 @@ func (s *Server) startProcessHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type ListProcessesResponse struct {
-	Processes []map[string]interface{} `json:"processes"`
+	Processes []map[string]any `json:"processes"`
 }
 
 func (s *Server) listProcessesHandler(w http.ResponseWriter, r *http.Request) {
@@ -322,7 +322,7 @@ func (s *Server) listProcessesHandler(w http.ResponseWriter, r *http.Request) {
 
 	processes := s.processManager.ListProcesses()
 
-	processesData := make([]map[string]interface{}, len(processes))
+	processesData := make([]map[string]any, len(processes))
 	for i, p := range processes {
 		processesData[i] = p.ToSummaryJSON()
 	}
@@ -504,7 +504,7 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Streaming command completed", "cmd", req.Cmd, "exit_code", exitCode)
 
 	// Send completion event
-	completeData, _ := json.Marshal(map[string]interface{}{
+	completeData, _ := json.Marshal(map[string]any{
 		"code":  exitCode,
 		"error": err != nil,
 	})

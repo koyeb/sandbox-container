@@ -138,7 +138,7 @@ func TestRunStreamingHandlerLongOutput(t *testing.T) {
 
 	// Parse SSE events and sum up stdout data lengths.
 	total := 0
-	for _, line := range strings.Split(w.Body.String(), "\n") {
+	for line := range strings.SplitSeq(w.Body.String(), "\n") {
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
@@ -166,7 +166,7 @@ func TestRunStreamingHandlerCarriageReturnProgress(t *testing.T) {
 		"Receiving objects: 100%",
 	}
 	got := make([]string, 0, len(want))
-	for _, line := range strings.Split(w.Body.String(), "\n") {
+	for line := range strings.SplitSeq(w.Body.String(), "\n") {
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
@@ -198,7 +198,7 @@ func streamingEvents(t *testing.T, mux http.Handler, cmd, stream string) ([]stri
 	var lines []string
 	var complete map[string]any
 	event := ""
-	for _, line := range strings.Split(w.Body.String(), "\n") {
+	for line := range strings.SplitSeq(w.Body.String(), "\n") {
 		if name, ok := strings.CutPrefix(line, "event: "); ok {
 			event = name
 			continue

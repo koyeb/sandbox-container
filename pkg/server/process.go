@@ -339,11 +339,11 @@ func (pm *ProcessManager) StreamProcessLogs(id string) (<-chan LogEntry, error) 
 }
 
 // ToJSON returns a JSON-serializable representation of the process
-func (p *Process) ToJSON() map[string]interface{} {
+func (p *Process) ToJSON() map[string]any {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	result := map[string]interface{}{
+	result := map[string]any{
 		"id":         p.ID,
 		"pid":        p.PID,
 		"status":     p.Status,
@@ -367,11 +367,11 @@ func (p *Process) ToJSON() map[string]interface{} {
 }
 
 // ToSummaryJSON returns a minimal JSON representation for list views
-func (p *Process) ToSummaryJSON() map[string]interface{} {
+func (p *Process) ToSummaryJSON() map[string]any {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	return map[string]interface{}{
+	return map[string]any{
 		"id":      p.ID,
 		"pid":     p.PID,
 		"status":  p.Status,
