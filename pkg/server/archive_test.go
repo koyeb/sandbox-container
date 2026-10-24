@@ -458,14 +458,19 @@ func TestFilesArchiveErrors(t *testing.T) {
 		t.Errorf("entries extracted before the cut: %q", got)
 	}
 
-	// A symlink entry over an existing symlink is a conflict, not a replace.
+	// A symlink entry replaces a stale link: the archive's word wins.
 	dest := filepath.Join(root, "d4")
 	os.MkdirAll(dest, 0o755)
 	os.Symlink("elsewhere", filepath.Join(dest, "link"))
 	overlink := craftTarGz(t, []tar.Header{
 		{Name: "link", Typeflag: tar.TypeSymlink, Linkname: "target", Mode: 0o777},
 	}, nil)
-	expectError(t, put(dest, overlink), http.StatusConflict)
+	if w := put(dest, overlink); w.Code != http.StatusOK {
+		t.Errorf("replacing a stale symlink: %d: %q", w.Code, w.Body.String())
+	}
+	if target, err := os.Readlink(filepath.Join(dest, "link")); err != nil || target != "target" {
+		t.Errorf("link points at %q (%v), want the archive's target", target, err)
+	}
 
 	// The routes are closed without a token, like the others.
 	if w := serve(mux, httptest.NewRequest(http.MethodGet,
@@ -885,6 +890,156 @@ func TestFilesArchiveReadOnlyDirs(t *testing.T) {
 	}
 	if fi.Mode().Perm() != 0o500 || !fi.ModTime().Equal(at) {
 		t.Errorf("ro: mode %o mtime %v, want 0500 and %v", fi.Mode().Perm(), fi.ModTime(), at)
+	}
+}
+
+// Extracting the same archive over its own output works: members replace
+// what they find, never follow it — a file restored with a restrictive mode
+// or a symlink restored by the first pass is no obstacle to the second.
+func TestFilesArchivePutReExtractOwnOutput(t *testing.T) {
+	_, mux := newTestServer(t)
+	src := t.TempDir()
+	os.MkdirAll(filepath.Join(src, "sub"), 0o755)
+	os.WriteFile(filepath.Join(src, "ro.txt"), []byte("data"), 0o400)
+	os.WriteFile(filepath.Join(src, "sub", "leaf"), []byte("x"), 0o600)
+	os.Symlink("sub", filepath.Join(src, "link"))
+	// USTAR carries mtimes to the second; pin whole-second values like the
+	// format does.
+	at := time.Date(2022, 2, 3, 4, 5, 6, 0, time.UTC)
+	chTime(t, filepath.Join(src, "ro.txt"), at)
+	chTime(t, filepath.Join(src, "sub", "leaf"), at)
+	chTime(t, filepath.Join(src, "sub"), at)
+	t.Cleanup(func() { os.Chmod(filepath.Join(src, "ro.txt"), 0o755) })
+
+	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files/archive", src), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET: %d", w.Code)
+	}
+	archive := w.Body.Bytes()
+
+	dest := t.TempDir()
+	t.Cleanup(func() { os.Chmod(filepath.Join(dest, "ro.txt"), 0o755) })
+	var first, second ArchiveResult
+	for i, res := range []*ArchiveResult{&first, &second} {
+		w = serve(mux, newAuthRequest(http.MethodPut, filesURL("/files/archive", dest), archive))
+		if w.Code != http.StatusOK {
+			t.Fatalf("PUT %d: %d: %q", i+1, w.Code, w.Body.String())
+		}
+		if err := json.NewDecoder(w.Body).Decode(res); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if first != second {
+		t.Errorf("re-extraction differs: %+v vs %+v", first, second)
+	}
+	assertTreeEqual(t, src, dest, false)
+}
+
+// How extraction treats what is already at a member's path: a symlink in a
+// parent component's way is refused — extraction never writes through a
+// pre-existing link — while the member itself replaces what it finds, as
+// tar does, so a stale link or file can't misdirect it.
+func TestFilesArchivePutExistingDestinations(t *testing.T) {
+	_, mux := newTestServer(t)
+
+	cases := []struct {
+		name  string
+		want  int
+		entry []tar.Header
+		body  map[string][]byte
+		prep  func(t *testing.T, dest string)
+		check func(t *testing.T, dest string)
+	}{
+		{
+			name: "under a symlinked parent",
+			want: http.StatusConflict,
+			entry: []tar.Header{
+				{Name: "evil/x", Typeflag: tar.TypeReg, Mode: 0o644},
+			},
+			body: map[string][]byte{"evil/x": []byte("evil")},
+			prep: func(t *testing.T, dest string) {
+				os.MkdirAll(filepath.Join(dest, "target"), 0o755)
+				os.Symlink("target", filepath.Join(dest, "evil"))
+			},
+			check: func(t *testing.T, dest string) {
+				if _, err := os.Stat(filepath.Join(dest, "target", "x")); !errors.Is(err, os.ErrNotExist) {
+					t.Error("the member escaped through the pre-existing link")
+				}
+			},
+		},
+		{
+			name: "a directory member over a symlink",
+			want: http.StatusConflict,
+			entry: []tar.Header{
+				{Name: "d", Typeflag: tar.TypeDir, Mode: 0o755},
+				{Name: "d/f", Typeflag: tar.TypeReg, Mode: 0o644},
+			},
+			body: map[string][]byte{"d/f": []byte("x")},
+			prep: func(t *testing.T, dest string) {
+				os.MkdirAll(filepath.Join(dest, "target"), 0o755)
+				os.Symlink("target", filepath.Join(dest, "d"))
+			},
+			check: func(t *testing.T, dest string) {
+				if fi, err := os.Lstat(filepath.Join(dest, "d")); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+					t.Error("the pre-existing link was replaced")
+				}
+				if _, err := os.Stat(filepath.Join(dest, "target", "f")); !errors.Is(err, os.ErrNotExist) {
+					t.Error("the member escaped through the pre-existing link")
+				}
+			},
+		},
+		{
+			name: "a file member onto a symlink",
+			want: http.StatusOK,
+			entry: []tar.Header{
+				{Name: "evil", Typeflag: tar.TypeReg, Mode: 0o644},
+			},
+			body: map[string][]byte{"evil": []byte("replaced")},
+			prep: func(t *testing.T, dest string) {
+				os.MkdirAll(filepath.Join(dest, "target"), 0o755)
+				os.Symlink("target", filepath.Join(dest, "evil"))
+			},
+			check: func(t *testing.T, dest string) {
+				if fi, err := os.Lstat(filepath.Join(dest, "evil")); err != nil || fi.Mode()&fs.ModeSymlink != 0 {
+					t.Errorf("the member was written through the link: %v", err)
+				}
+				if got, _ := os.ReadFile(filepath.Join(dest, "evil")); string(got) != "replaced" {
+					t.Errorf("content: %q", got)
+				}
+			},
+		},
+		{
+			name: "a symlink member over an existing file",
+			want: http.StatusOK,
+			entry: []tar.Header{
+				{Name: "f", Typeflag: tar.TypeSymlink, Linkname: "sub", Mode: 0o777},
+			},
+			prep: func(t *testing.T, dest string) {
+				os.WriteFile(filepath.Join(dest, "f"), []byte("old file"), 0o644)
+			},
+			check: func(t *testing.T, dest string) {
+				if fi, err := os.Lstat(filepath.Join(dest, "f")); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+					t.Errorf("the file was not replaced by the link: %v", err)
+				}
+				if target, err := os.Readlink(filepath.Join(dest, "f")); err != nil || target != "sub" {
+					t.Errorf("link target %q (%v)", target, err)
+				}
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dest := t.TempDir()
+			c.prep(t, dest)
+			body := craftTarGz(t, c.entry, c.body)
+			w := serve(mux, newAuthRequest(http.MethodPut, filesURL("/files/archive", dest), body))
+			if w.Code != c.want {
+				t.Fatalf("expected %d, got %d: %q", c.want, w.Code, w.Body.String())
+			}
+			if c.check != nil {
+				c.check(t, dest)
+			}
+		})
 	}
 }
 

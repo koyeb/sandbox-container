@@ -134,6 +134,9 @@ func extractEntry(tr *tar.Reader, root string, hdr *tar.Header) (*dirTime, int, 
 	if err != nil {
 		return nil, 0, 0, err
 	}
+	if err := inTheWay(root, name); err != nil {
+		return nil, 0, 0, err
+	}
 	dest := filepath.Join(root, filepath.FromSlash(name))
 	// Directory members are a courtesy many archives skip: create the
 	// parents of every entry, as tar does.
@@ -168,6 +171,10 @@ func extractEntry(tr *tar.Reader, root string, hdr *tar.Header) (*dirTime, int, 
 // here: restoreDirs sets it after the contents, so a restrictive mode can't
 // lock them out of extraction.
 func extractDirEntry(dest string, hdr *tar.Header) (*dirTime, error) {
+	// MkdirAll would follow a link at dest and merge into its target.
+	if info, err := os.Lstat(dest); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		return nil, &fs.PathError{Op: "extract", Path: dest, Err: fs.ErrExist}
+	}
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return nil, err
 	}
@@ -180,6 +187,9 @@ func extractSymlink(dest, name string, hdr *tar.Header) error {
 	if err := resolveLinkTarget(name, hdr.Linkname); err != nil {
 		return err
 	}
+	if err := clearMemberPath(dest); err != nil {
+		return err
+	}
 	return os.Symlink(hdr.Linkname, dest)
 }
 
@@ -187,6 +197,9 @@ func extractSymlink(dest, name string, hdr *tar.Header) error {
 func extractHardlink(root, dest string, hdr *tar.Header) error {
 	target, err := cleanEntryName(hdr.Linkname)
 	if err != nil {
+		return err
+	}
+	if err := clearMemberPath(dest); err != nil {
 		return err
 	}
 	return os.Link(filepath.Join(root, filepath.FromSlash(target)), dest)
@@ -201,6 +214,40 @@ func cleanEntryName(name string) (string, error) {
 		return "", fmt.Errorf("entry %q: name must stay inside the archive root", name)
 	}
 	return cleaned, nil
+}
+
+// inTheWay reports a symlink among a member's existing ancestor components
+// under root: extraction never writes through a pre-existing link, so a
+// merge can't escape the archive root. The member's own path is not
+// checked here — clearMemberPath and the dir guard handle what sits at it.
+func inTheWay(root, name string) error {
+	parts := strings.Split(name, "/")
+	p := root
+	for _, part := range parts[:len(parts)-1] {
+		p = filepath.Join(p, part)
+		info, err := os.Lstat(p)
+		if err != nil {
+			// Nothing deeper can exist; the archive creates the rest.
+			return nil
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return &fs.PathError{Op: "extract", Path: p, Err: fs.ErrExist}
+		}
+	}
+	return nil
+}
+
+// clearMemberPath removes what sits at a leaf member's destination, as tar
+// does: a file or a link in the way is replaced — never written through —
+// and a re-extraction over the archive's own output can't fail on the modes
+// or links it restored. A directory in the way is left for the create to
+// refuse.
+func clearMemberPath(dest string) error {
+	info, err := os.Lstat(dest)
+	if err != nil || info.IsDir() {
+		return nil
+	}
+	return os.Remove(dest)
 }
 
 // resolveLinkTarget validates the Linkname of a symlink entry named name. A
@@ -222,6 +269,9 @@ func resolveLinkTarget(name, target string) error {
 // mtime. The mode comes after the copy: the create mode goes through the
 // process's umask, the chmod doesn't.
 func extractFile(tr *tar.Reader, dest string, hdr *tar.Header) (int64, error) {
+	if err := clearMemberPath(dest); err != nil {
+		return 0, err
+	}
 	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fs.FileMode(hdr.Mode&0o7777))
 	if err != nil {
 		return 0, err
