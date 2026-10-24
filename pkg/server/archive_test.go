@@ -160,10 +160,7 @@ func TestFilesArchivePutRoundTrip(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("PUT: %d: %q", w.Code, w.Body.String())
 	}
-	var res struct {
-		Files int   `json:"files"`
-		Bytes int64 `json:"bytes"`
-	}
+	var res ArchiveResult
 	if err := json.NewDecoder(w.Body).Decode(&res); err != nil {
 		t.Fatal(err)
 	}
@@ -287,10 +284,7 @@ func TestFilesArchivePutDotRootShape(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %q", w.Code, w.Body.String())
 	}
-	var res struct {
-		Files int   `json:"files"`
-		Bytes int64 `json:"bytes"`
-	}
+	var res ArchiveResult
 	json.NewDecoder(w.Body).Decode(&res)
 	if res.Files != 2 || res.Bytes != 9 {
 		t.Errorf("result %+v, expected 2 files and 9 bytes", res)
@@ -318,10 +312,7 @@ func TestFilesArchivePutHardlink(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %q", w.Code, w.Body.String())
 	}
-	var res struct {
-		Files int   `json:"files"`
-		Bytes int64 `json:"bytes"`
-	}
+	var res ArchiveResult
 	if err := json.NewDecoder(w.Body).Decode(&res); err != nil {
 		t.Fatal(err)
 	}
@@ -363,10 +354,7 @@ func TestFilesArchivePutGlobalHeader(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %q", w.Code, w.Body.String())
 	}
-	var res struct {
-		Files int   `json:"files"`
-		Bytes int64 `json:"bytes"`
-	}
+	var res ArchiveResult
 	if err := json.NewDecoder(w.Body).Decode(&res); err != nil {
 		t.Fatal(err)
 	}
@@ -581,10 +569,7 @@ func TestFilesArchivePutExtractsIncrementally(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %q", w.Code, w.Body.String())
 		}
-		var res struct {
-			Files int   `json:"files"`
-			Bytes int64 `json:"bytes"`
-		}
+		var res ArchiveResult
 		if err := json.NewDecoder(w.Body).Decode(&res); err != nil {
 			t.Fatal(err)
 		}
@@ -618,10 +603,7 @@ func TestFilesArchiveBigRoundTrip(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("PUT: %d: %q", w.Code, w.Body.String())
 	}
-	var res struct {
-		Files int   `json:"files"`
-		Bytes int64 `json:"bytes"`
-	}
+	var res ArchiveResult
 	if err := json.NewDecoder(w.Body).Decode(&res); err != nil {
 		t.Fatal(err)
 	}
