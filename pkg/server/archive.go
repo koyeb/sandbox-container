@@ -134,13 +134,8 @@ func extractEntry(tr *tar.Reader, root string, hdr *tar.Header) (*dirTime, int, 
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	if err := inTheWay(root, name); err != nil {
-		return nil, 0, 0, err
-	}
-	dest := filepath.Join(root, filepath.FromSlash(name))
-	// Directory members are a courtesy many archives skip: create the
-	// parents of every entry, as tar does.
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+	dest, err := prepareMemberDest(root, name)
+	if err != nil {
 		return nil, 0, 0, err
 	}
 	switch hdr.Typeflag {
@@ -165,6 +160,21 @@ func extractEntry(tr *tar.Reader, root string, hdr *tar.Header) (*dirTime, int, 
 	default:
 		return nil, 0, 0, fmt.Errorf("entry %q: unsupported type %q", hdr.Name, string(hdr.Typeflag))
 	}
+}
+
+// prepareMemberDest returns the member's destination under root, after
+// refusing links in the way and creating the parent directories: directory
+// members are a courtesy many archives skip, so every entry's parents are
+// made as tar does.
+func prepareMemberDest(root, name string) (string, error) {
+	if err := inTheWay(root, name); err != nil {
+		return "", err
+	}
+	dest := filepath.Join(root, filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return "", err
+	}
+	return dest, nil
 }
 
 // extractDirEntry creates one directory. Its archived mode is not applied
