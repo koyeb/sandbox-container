@@ -61,7 +61,7 @@ func fsErrorStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, fs.ErrPermission):
 		return http.StatusForbidden
-	case errors.Is(err, fs.ErrExist), errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.EISDIR), errors.Is(err, syscall.ENOTEMPTY):
+	case errors.Is(err, fs.ErrExist), errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.EISDIR), errors.Is(err, syscall.ENOTEMPTY), errors.Is(err, syscall.ELOOP):
 		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
@@ -104,29 +104,63 @@ func fileEntry(rel string, info fs.FileInfo) FileEntry {
 	}
 }
 
+// notRegularError reports a download target that is a FIFO, socket, device
+// or directory: open() on a writer-less FIFO would block until a writer
+// appears, holding the handler and its connection forever.
+type notRegularError struct {
+	path string
+	kind string
+}
+
+func (e notRegularError) Error() string {
+	return fmt.Sprintf("%s is not a regular file (it is a %s)", e.path, e.kind)
+}
+
+// openRegular opens path for download, following symlinks like the download
+// itself does, and returns the opened file with its Stat. A special file is
+// rejected before the open; a race that swaps the file for a special one
+// between Stat and Open is caught after it.
+func openRegular(path string) (*os.File, fs.FileInfo, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, notRegularError{path: path, kind: fileType(info.Mode())}
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if info, err = f.Stat(); err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, nil, notRegularError{path: path, kind: fileType(info.Mode())}
+	}
+	return f, info, nil
+}
+
 func (s *Server) getFileHandler(w http.ResponseWriter, r *http.Request) {
 	path, ok := pathParam(w, r)
 	if !ok {
 		return
 	}
 
-	f, err := os.Open(path)
+	f, info, err := openRegular(path)
 	if err != nil {
-		slog.Debug("Failed to open file", "path", path, "error", err)
-		writeFSError(w, err)
+		var nre notRegularError
+		if errors.As(err, &nre) {
+			writeFileError(w, http.StatusBadRequest, nre.Error())
+		} else {
+			slog.Debug("Failed to open file", "path", path, "error", err)
+			writeFSError(w, err)
+		}
 		return
 	}
 	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		writeFSError(w, err)
-		return
-	}
-	if !info.Mode().IsRegular() {
-		writeFileError(w, http.StatusBadRequest, fmt.Sprintf("%s is a %s, not a regular file", path, fileType(info.Mode())))
-		return
-	}
 
 	slog.Debug("Serving file", "path", path, "bytes", info.Size(), "range", r.Header.Get("Range"))
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -135,7 +169,9 @@ func (s *Server) getFileHandler(w http.ResponseWriter, r *http.Request) {
 	// them as they read, without a length, a validator or Range.
 	if info.Size() == 0 {
 		if r.Method != http.MethodHead {
-			io.Copy(w, f)
+			if _, err := io.Copy(w, f); err != nil {
+				slog.Debug("Failed to stream file", "path", path, "error", err)
+			}
 		}
 		return
 	}
@@ -172,7 +208,11 @@ func (s *Server) putFileHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	path = writeTarget(path)
+	path, err := writeTarget(path)
+	if err != nil {
+		writeFSError(w, err)
+		return
+	}
 	if info, err := os.Stat(path); err == nil {
 		if info.IsDir() {
 			writeFileError(w, http.StatusConflict, fmt.Sprintf("%s is a directory", path))
@@ -245,24 +285,29 @@ func (s *Server) putFileHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeTarget follows symlinks at path, as /write_file does, rather than
-// replacing the link, including a link whose target doesn't exist yet.
-func writeTarget(path string) string {
-	// 40 hops, the kernel's limit: past it, the loop is left to fail as ELOOP.
+// replacing the link, including a link whose target doesn't exist yet. A
+// chain longer than the kernel's limit resolves to no file: fail the way
+// the kernel would, instead of overwriting the last link.
+func writeTarget(path string) (string, error) {
+	// 40 hops, the kernel's limit.
 	for range 40 {
 		info, err := os.Lstat(path)
 		if err != nil || info.Mode()&fs.ModeSymlink == 0 {
-			return path
+			return path, nil
 		}
 		target, err := os.Readlink(path)
 		if err != nil {
-			return path
+			return path, nil
 		}
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(path), target)
 		}
 		path = target
 	}
-	return path
+	if info, err := os.Lstat(path); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		return "", &fs.PathError{Op: "write", Path: path, Err: syscall.ELOOP}
+	}
+	return path, nil
 }
 
 // commitTempFile makes tmp durable with mode and renames it to path.
