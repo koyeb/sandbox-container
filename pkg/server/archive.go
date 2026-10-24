@@ -177,7 +177,7 @@ func extractDirEntry(dest string, hdr *tar.Header) (*dirTime, error) {
 // extractSymlink stores one link byte-identical to the archive, after
 // checking its resolved target stays inside the root.
 func extractSymlink(dest, name string, hdr *tar.Header) error {
-	if _, err := resolveLinkTarget(name, hdr.Linkname); err != nil {
+	if err := resolveLinkTarget(name, hdr.Linkname); err != nil {
 		return err
 	}
 	return os.Symlink(hdr.Linkname, dest)
@@ -203,20 +203,19 @@ func cleanEntryName(name string) (string, error) {
 	return cleaned, nil
 }
 
-// resolveLinkTarget validates the Linkname of a symlink entry named name,
-// returning the target's path relative to the root. A relative target is
-// read relative to the entry's directory, as the filesystem would read it;
-// an absolute or escaping target is refused.
-func resolveLinkTarget(name, target string) (string, error) {
+// resolveLinkTarget validates the Linkname of a symlink entry named name. A
+// relative target is read relative to the entry's directory, as the filesystem
+// would read it; an absolute or escaping target is refused.
+func resolveLinkTarget(name, target string) error {
 	if target == "" || path.IsAbs(target) {
-		return "", fmt.Errorf(
+		return fmt.Errorf(
 			"entry %q: link target %q must be relative and inside the archive root", name, target)
 	}
 	resolved := path.Clean(path.Join(path.Dir(name), target))
 	if resolved == ".." || strings.HasPrefix(resolved, "../") {
-		return "", fmt.Errorf("entry %q: link target %q escapes the archive root", name, target)
+		return fmt.Errorf("entry %q: link target %q escapes the archive root", name, target)
 	}
-	return resolved, nil
+	return nil
 }
 
 // extractFile streams one member into dest and then applies its mode and

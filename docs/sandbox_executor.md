@@ -429,7 +429,8 @@ answers:
   parent directory members, and hardlinks (the `Linkname` is the archive-root member path). FIFOs,
   devices and other unsupported member types are a `400`
 - Extraction is not atomic: a body that ends mid-stream leaves the members already extracted (as tar
-  does) and answers `400`
+  does) and answers `400`. A `PUT` whose `path` exists as a file is a `409`: the archive root must be a
+  directory
 
 **Examples:**
 ```bash
