@@ -25,6 +25,7 @@ The Sandbox Executor is an HTTP server that provides a secure API for executing 
   - [Upload File](#upload-file)
   - [Stat File](#stat-file)
   - [List Files](#list-files)
+  - [Archive Directory](#archive-directory)
 - [Write File](#write-file)
 - [Read File](#read-file)
 - [Delete File](#delete-file)
@@ -385,6 +386,65 @@ directory's direct entries are listed.
 ```bash
 curl -H "Authorization: Bearer your-secret" \
   "http://localhost:8080/files/list?path=/workspace&recursive=1"
+```
+
+---
+
+### Archive Directory
+
+**Endpoint:** `GET /files/archive?path=<dir>[&exclude=<glob>...]` and `PUT /files/archive?path=<dir>`
+
+**Description:** Moves a whole directory tree as one gzip'd tar, streamed in both directions with a bounded
+memory footprint: a large tree is never held in memory, on either side.
+
+`GET` responds with `Content-Type: application/gzip` and a tar of the directory:
+
+- Entry names are the paths relative to the directory, `/`-separated; the directory itself is not an entry
+- `exclude` patterns (repeat the parameter for several) match any suffix of a relative path at a `/`
+  boundary, as `tar --exclude` does: `node_modules` drops `sub/node_modules` too, `*.log` drops `.log`
+  files at any depth. A matching directory is skipped whole; a malformed pattern is a `400`
+- Symlinks are archived as links, not followed; special files (FIFOs, sockets, devices) are skipped.
+  Hardlinked paths are archived as independent copies: the extractor's hardlink support covers foreign
+  archives
+- The walk is streamed. A failure before the first entry is answered with the error status and JSON
+  body; past it, the response is a `200` that ends short, without a gzip footer or tar trailer, so the
+  client's decompressor reports the truncation — a partial archive never looks complete
+
+`PUT` extracts the archive's members under `<dir>`, creating it if missing, merging if it exists, and
+answers:
+
+```json
+{"files": 2, "bytes": 4096}
+```
+
+`files` counts regular files and hardlinks, `bytes` the content bytes written.
+
+- Every member name must stay inside `<dir>` after cleaning: absolute names, `..` and links whose
+  resolved target leaves the directory are refused with `400` — the refused member itself is never
+  created (its parent directories may already have been, and members before it stay)
+- Modes and mtimes are kept (directory modes and mtimes are applied after the directory's contents,
+  like tar); symlinks are stored byte-identical to the archive, but a symlink's mtime cannot be
+  restored — the standard library has no way to set it
+- GNU-tar shapes work: `./`-prefixed entries (`tar czf x.tgz -C dir .`), PAX global headers, missing
+  parent directory members, and hardlinks (the `Linkname` is the archive-root member path). FIFOs,
+  devices and other unsupported member types are a `400`
+- Members replace what is at their own path, as tar does — a stale file or link is removed first, never
+  written through, so re-extracting an archive over its own output works. A symlink in a parent
+  component's way is a `409`, whatever created it: extraction never writes through a parent link.
+  Archives this route's own GET produces never hit that — their links are members, not parents
+- Extraction is not atomic: a body that ends mid-stream leaves the members already extracted (as tar
+  does) and answers `400`. A `PUT` whose `path` exists as a file is a `409`: the archive root must be a
+  directory
+
+**Examples:**
+```bash
+curl -H "Authorization: Bearer your-secret" \
+  "http://localhost:8080/files/archive?path=/workspace&exclude=node_modules&exclude=*.log" \
+  -o workspace.tgz
+
+curl -X PUT -H "Authorization: Bearer your-secret" \
+  --data-binary @workspace.tgz \
+  "http://localhost:8080/files/archive?path=/workspace"
 ```
 
 ---
