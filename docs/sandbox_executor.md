@@ -429,8 +429,9 @@ answers:
   parent directory members, and hardlinks (the `Linkname` is the archive-root member path). FIFOs,
   devices and other unsupported member types are a `400`
 - Members replace what is at their own path, as tar does — a stale file or link is removed first, never
-  written through, so re-extracting an archive over its own output works. A pre-existing symlink in a
-  parent component's way is a `409`: extraction never writes through a link it did not create
+  written through, so re-extracting an archive over its own output works. A symlink in a parent
+  component's way is a `409`, whatever created it: extraction never writes through a parent link.
+  Archives this route's own GET produces never hit that — their links are members, not parents
 - Extraction is not atomic: a body that ends mid-stream leaves the members already extracted (as tar
   does) and answers `400`. A `PUT` whose `path` exists as a file is a `409`: the archive root must be a
   directory
