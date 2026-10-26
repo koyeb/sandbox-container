@@ -1141,6 +1141,7 @@ field instead.
 ## Security Considerations
 
 - All file and directory operations are performed with the permissions of the user running the server
+- The file routes (`/files`, `/files/stat`, `/files/list` and the legacy JSON file routes) read and write any path on the executor's filesystem, gated only by the bearer token — by design, like `/run`: treat the token as full filesystem access
 - Command execution uses `sh -c`, allowing shell features but also potential security risks
 - The server should be run in a properly isolated environment (container, VM, etc.)
 - The sandbox secret should be kept confidential and rotated regularly

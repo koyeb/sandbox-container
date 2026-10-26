@@ -449,6 +449,7 @@ curl -X POST http://localhost:8080/kill_process \
 ## Security Considerations
 
 - This container executes arbitrary commands and should only be used in trusted, isolated environments
+- File routes (`/files` and the JSON file routes) reach any path on the executor's filesystem; the bearer token is the only barrier — treat it as full filesystem access
 - Always use strong, randomly generated values for `SANDBOX_SECRET`
 - Consider running the container with appropriate resource limits and network isolation
 - Do not expose this service directly to the internet without additional security measures
