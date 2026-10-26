@@ -32,20 +32,20 @@ func (s *Server) registerFileRoutes(mux *http.ServeMux) {
 }
 
 type PutFileResponse struct {
-	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
 }
 
 // FileEntry describes a file in /files/stat and /files/list responses.
 type FileEntry struct {
 	Path   string `json:"path,omitempty"`
 	Type   string `json:"type,omitempty"`
-	Size   int64  `json:"size"`
 	Mode   string `json:"mode,omitempty"`
 	MTime  string `json:"mtime,omitempty"`
 	SHA256 string `json:"sha256,omitempty"`
 	// Error is set on a /files/list entry that could not be read; the listing goes on.
 	Error string `json:"error,omitempty"`
+	Size  int64  `json:"size"`
 }
 
 func writeFileError(w http.ResponseWriter, status int, msg string) {
