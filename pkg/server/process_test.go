@@ -1,6 +1,11 @@
 package server
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -336,5 +341,142 @@ func TestProcessWithWorkingDirectory(t *testing.T) {
 
 	if !foundTmp {
 		t.Error("Expected working directory to be /tmp")
+	}
+}
+
+// recordingHandler captures the records slog routes to it, for tests that
+// assert what the package logs.
+type recordingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r)
+	return nil
+}
+
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *recordingHandler) messages(msg string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, r := range h.records {
+		if r.Message == msg {
+			n++
+		}
+	}
+	return n
+}
+
+// hasMessageError reports whether a record with msg carries an error whose
+// text contains errSubstr. The capture goroutines race cmd.Wait's pipe
+// close, so a clean run may also log a stop with a file-closed error.
+func (h *recordingHandler) hasMessageError(msg, errSubstr string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Message != msg {
+			continue
+		}
+		found := false
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "error" && strings.Contains(a.Value.String(), errSubstr) {
+				found = true
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+// captureOutput takes lines up to 1MB; a longer line ends that stream's
+// capture with a logged reason instead of stopping silently.
+func TestProcessManagerCaptureStopsAtLineLimit(t *testing.T) {
+	old := slog.Default()
+	rec := &recordingHandler{}
+	slog.SetDefault(slog.New(rec))
+	defer slog.SetDefault(old)
+
+	pm := NewProcessManager()
+
+	// Under the limit: one long line, captured whole.
+	process, err := pm.StartProcess(fmt.Sprintf("bash -c \"head -c %d /dev/zero | tr '\\0' 'a'; echo\"", 100*1024), "", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if !waitForLogs(t, pm, process.ID, func(logs []LogEntry) bool {
+		return len(logs) == 1 && len(logs[0].Data) == 100*1024
+	}) {
+		logs, _ := pm.GetProcessLogs(process.ID)
+		t.Fatalf("the 100KB line was not captured: %+v", logs)
+	}
+
+	// Over the limit: the stream's capture stops and says so.
+	process, err = pm.StartProcess(fmt.Sprintf("bash -c \"head -c %d /dev/zero | tr '\\0' 'a'; echo\"", 1024*1024+100), "", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForProcess(t, process)
+	deadline := time.Now().Add(5 * time.Second)
+	for !rec.hasMessageError("Process log capture stopped", "too long") {
+		if time.Now().After(deadline) {
+			t.Fatal("capture stopped without logging the scanner error")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	logs, err := pm.GetProcessLogs(process.ID)
+	if err != nil {
+		t.Fatalf("logs: %v", err)
+	}
+	for _, entry := range logs {
+		if len(entry.Data) > 1024*1024 {
+			t.Errorf("over-limit line captured: %d bytes", len(entry.Data))
+		}
+	}
+}
+
+// GetProcessLogs returns each stream in order, stdout entries before stderr:
+// the buffers decide the merge, not timestamps.
+func TestProcessManagerLogStreamsNotInterleaved(t *testing.T) {
+	pm := NewProcessManager()
+	process, err := pm.StartProcess("bash -c 'echo A; echo B >&2; echo C'", "", nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if !waitForLogs(t, pm, process.ID, func(logs []LogEntry) bool {
+		return len(logs) == 3
+	}) {
+		logs, _ := pm.GetProcessLogs(process.ID)
+		t.Fatalf("expected 3 log entries, got %+v", logs)
+	}
+	logs, err := pm.GetProcessLogs(process.ID)
+	if err != nil {
+		t.Fatalf("logs: %v", err)
+	}
+	want := []struct {
+		stream string
+		data   string
+	}{
+		{"stdout", "A"},
+		{"stdout", "C"},
+		{"stderr", "B"},
+	}
+	if len(logs) != len(want) {
+		t.Fatalf("got %d entries: %+v", len(logs), logs)
+	}
+	for i, w := range want {
+		if logs[i].Stream != w.stream || logs[i].Data != w.data {
+			t.Errorf("entry %d: got (%s,%q), want (%s,%q)", i, logs[i].Stream, logs[i].Data, w.stream, w.data)
+		}
 	}
 }

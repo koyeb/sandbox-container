@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -439,5 +440,106 @@ func TestReadFileEnvelope(t *testing.T) {
 	}
 	if w.Code != http.StatusOK || errResp.Error == "" || errResp.Content != "" {
 		t.Errorf("read-error: %d %+v", w.Code, errResp)
+	}
+}
+
+// checkCwd is the whole answer to a bad cwd: the request stops with exactly
+// the text/plain 400, and a usable cwd runs the command.
+func TestRunCwdContract(t *testing.T) {
+	_, mux := newTestServer(t)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "f")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "missing")
+
+	cases := []struct {
+		name string
+		cwd  string
+		code int
+	}{
+		{"usable cwd runs the command", dir, http.StatusOK},
+		{"a file is not a working directory", file, http.StatusBadRequest},
+		{"a missing path is not a working directory", missing, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reqBody, _ := json.Marshal(RunRequest{Cmd: "echo ok", Cwd: tc.cwd})
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/run", reqBody))
+
+			if w.Code != tc.code {
+				t.Fatalf("expected %d, got %d: %s", tc.code, w.Code, w.Body.String())
+			}
+			if tc.code == http.StatusOK {
+				var resp RunResponse
+				if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+					t.Fatalf("decode: %v (%s)", err, w.Body.String())
+				}
+				if resp.Stdout != "ok\n" {
+					t.Errorf("stdout: got %q", resp.Stdout)
+				}
+				return
+			}
+			if want := "Invalid working directory: " + tc.cwd + "\n"; w.Body.String() != want {
+				t.Errorf("body: got %q, want %q", w.Body.String(), want)
+			}
+		})
+	}
+}
+
+// The guarded Cancel kills the command's whole process group, and a second
+// call once the group is reaped reports nothing: that ESRCH race is the
+// drift between /run and /run_streaming this helper closed.
+func TestCancelProcessGroupKillsGroupAndToleratesEsrch(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "pid")
+
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
+	cmd := exec.CommandContext(ctx, "sh", "-c", "sleep 30 & echo $! > "+pidFile+"; wait")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = cancelProcessGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	pgid := cmd.Process.Pid
+	t.Cleanup(func() { syscall.Kill(-pgid, syscall.SIGKILL) })
+
+	// The descendant's pid, reported by the shell.
+	pid := 0
+	deadline := time.Now().Add(5 * time.Second)
+	for pid == 0 {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+				pid = n
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("descendant pid never appeared")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancelCtx()
+	_ = cmd.Wait()
+
+	// The group died, not just the shell.
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if err := syscall.Kill(pid, 0); err == syscall.ESRCH {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("descendant %d survived the group kill", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Cancel again after the reap: ESRCH is not an error.
+	if err := cmd.Cancel(); err != nil {
+		t.Errorf("cancel after reap: %v", err)
 	}
 }
