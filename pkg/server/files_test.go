@@ -329,6 +329,9 @@ func readNDJSON(t *testing.T, body io.Reader) map[string]FileEntry {
 		}
 		entries[e.Path] = e
 	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("reading the listing stopped early: %v", err)
+	}
 	return entries
 }
 
