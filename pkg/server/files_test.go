@@ -640,3 +640,73 @@ func TestFilesStatSpecial(t *testing.T) {
 		t.Errorf("stat FIFO type %q, expected other", entry.Type)
 	}
 }
+
+// fsErrorStatus is the wire contract the SDKs code against: pin every
+// row, including the two that had no test until now (403, 500).
+func TestFilesErrorStatusMap(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"missing", fs.ErrNotExist, http.StatusNotFound},
+		{"permission denied", fs.ErrPermission, http.StatusForbidden},
+		{"destination is a directory", errDestIsDir, http.StatusConflict},
+		{"already exists", fs.ErrExist, http.StatusConflict},
+		{"parent is a file", syscall.ENOTDIR, http.StatusConflict},
+		{"read of a directory", syscall.EISDIR, http.StatusConflict},
+		{"directory not empty", syscall.ENOTEMPTY, http.StatusConflict},
+		{"symlink chain too long", syscall.ELOOP, http.StatusConflict},
+		{"disk full", syscall.ENOSPC, http.StatusInternalServerError},
+		{"anything else", errors.New("unexpected"), http.StatusInternalServerError},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := fsErrorStatus(c.err); got != c.want {
+				t.Fatalf("fsErrorStatus(%v) = %d, want %d", c.err, got, c.want)
+			}
+		})
+	}
+}
+
+// A file the executor cannot read answers with the documented 403.
+func TestFilesGetForbidden(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses permission bits; no 403 to observe")
+	}
+	_, mux := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "locked")
+	os.WriteFile(path, []byte("x"), 0o644)
+	t.Cleanup(func() { os.Chmod(path, 0o644) })
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	expectError(t, serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", path), nil)), http.StatusForbidden)
+}
+
+// A current If-None-Match saves the transfer: 304, no body.
+func TestFilesGetNotModified(t *testing.T) {
+	_, mux := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "f")
+	os.WriteFile(path, []byte("hello"), 0o644)
+
+	head := serve(mux, newAuthRequest(http.MethodHead, filesURL("/files", path), nil))
+	etag := head.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("HEAD returned no ETag")
+	}
+
+	req := newAuthRequest(http.MethodGet, filesURL("/files", path), nil)
+	req.Header.Set("If-None-Match", etag)
+	if w := serve(mux, req); w.Code != http.StatusNotModified {
+		t.Fatalf("If-None-Match current: %d", w.Code)
+	} else if w.Body.Len() != 0 {
+		t.Errorf("304 carried a body: %q", w.Body.String())
+	}
+
+	req = newAuthRequest(http.MethodGet, filesURL("/files", path), nil)
+	req.Header.Set("If-None-Match", `"stale"`)
+	if w := serve(mux, req); w.Code != http.StatusOK || w.Body.String() != "hello" {
+		t.Fatalf("If-None-Match stale: %d %q", w.Code, w.Body.String())
+	}
+}
