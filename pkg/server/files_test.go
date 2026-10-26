@@ -68,8 +68,8 @@ func TestFilesBinaryRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "all-bytes.bin")
 
 	content := make([]byte, 0, 256*4)
-	for i := 0; i < 4; i++ {
-		for b := 0; b < 256; b++ {
+	for range 4 {
+		for b := range 256 {
 			content = append(content, byte(b))
 		}
 	}
