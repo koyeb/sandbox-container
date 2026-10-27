@@ -218,10 +218,14 @@ func (st *uploadStore) recordPart(sess *uploadSession, start, end int64) {
 	sess.spans = addSpan(sess.spans, start, end)
 }
 
-// receivedSpans copies the ranges received so far.
+// receivedSpans copies the ranges received so far; never nil, so callers
+// can encode it directly.
 func (st *uploadStore) receivedSpans(sess *uploadSession) []uploadSpan {
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	if sess.spans == nil {
+		return []uploadSpan{}
+	}
 	return slices.Clone(sess.spans)
 }
 
@@ -370,7 +374,7 @@ func createUploadSession(p openUploadParams) (*uploadSession, error) {
 	if dir == "" {
 		dir = "."
 	}
-	tmp, err := os.CreateTemp(dir, "."+name+".koyeb-tmp-*")
+	tmp, err := os.CreateTemp(dir, "."+name+tempMarker+"*")
 	if err != nil {
 		return nil, err
 	}
@@ -564,9 +568,6 @@ func (s *Server) uploadStatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spans := s.uploads.receivedSpans(sess)
-	if spans == nil {
-		spans = []uploadSpan{}
-	}
 	writeJSON(w, http.StatusOK, uploadStatusResponse{Size: sess.size, Ranges: spans})
 }
 
