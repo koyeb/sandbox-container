@@ -450,6 +450,17 @@ func TestUploadsModes(t *testing.T) {
 		t.Errorf("explicit mode: got %o, want 0755", info.Mode().Perm())
 	}
 
+	// The top of the permission range is a valid mode.
+	full := filepath.Join(dir, "full")
+	id = openUpload(t, mux, map[string]any{"path": full, "size": 1, "mode": "0777"})
+	putUploadPart(mux, id, 0, []byte("x"), "")
+	if w := completeUpload(mux, id); w.Code != http.StatusOK {
+		t.Fatalf("complete 0777: %d: %s", w.Code, w.Body.String())
+	}
+	if info, _ := os.Stat(full); info.Mode().Perm() != 0o777 {
+		t.Errorf("0777 mode: got %o, want 0777", info.Mode().Perm())
+	}
+
 	carried := filepath.Join(dir, "carried")
 	os.WriteFile(carried, []byte("old"), 0o741)
 	id = openUpload(t, mux, map[string]any{"path": carried, "size": 1})
@@ -641,7 +652,7 @@ func TestUploadsSlowPartKeepsSessionAlive(t *testing.T) {
 	srv.uploads.mu.Unlock()
 
 	pw := partWriter{st: srv.uploads, sess: sess, file: sess.file, off: 0, limit: 4096}
-	if _, err := pw.Write([]byte("chunk")); err != nil {
+	if _, err := pw.Write([]byte("c")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -649,6 +660,25 @@ func TestUploadsSlowPartKeepsSessionAlive(t *testing.T) {
 	srv.uploads.expireSessions(since.Add(time.Second))
 	if w := uploadStatus(mux, id); w.Code != http.StatusOK {
 		t.Fatalf("mid-copy session expired: %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// addSpan coalesces spans that overlap or merely touch, from either side.
+func TestUploadsSpanCoalescing(t *testing.T) {
+	// Descending, adjacent parts merge into one span.
+	spans := addSpan(nil, 128, 192)
+	spans = addSpan(spans, 64, 128)
+	spans = addSpan(spans, 0, 64)
+	if len(spans) != 1 || spans[0] != (uploadSpan{Start: 0, End: 192}) {
+		t.Fatalf("descending adjacent spans = %v, want one [0,192)", spans)
+	}
+
+	// Ascending and overlapping additions merge the same way.
+	spans = addSpan(nil, 0, 100)
+	spans = addSpan(spans, 100, 200)
+	spans = addSpan(spans, 50, 150)
+	if len(spans) != 1 || spans[0] != (uploadSpan{Start: 0, End: 200}) {
+		t.Fatalf("ascending overlapping spans = %v, want one [0,200)", spans)
 	}
 }
 
