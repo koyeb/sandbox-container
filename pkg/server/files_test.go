@@ -65,8 +65,8 @@ func TestFilesBinaryRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "all-bytes.bin")
 
 	content := make([]byte, 0, 256*4)
-	for i := 0; i < 4; i++ {
-		for b := 0; b < 256; b++ {
+	for range 4 {
+		for b := range 256 {
 			content = append(content, byte(b))
 		}
 	}
@@ -356,7 +356,9 @@ func TestFilesStat(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 	var entry FileEntry
-	json.NewDecoder(w.Body).Decode(&entry)
+	if err := json.NewDecoder(w.Body).Decode(&entry); err != nil {
+		t.Fatal(err)
+	}
 	sum := sha256.Sum256([]byte("hello"))
 	if entry.Type != "file" || entry.Size != 5 || entry.Mode != "0640" ||
 		entry.MTime == "" || entry.SHA256 != hex.EncodeToString(sum[:]) {
@@ -364,7 +366,9 @@ func TestFilesStat(t *testing.T) {
 	}
 
 	w = serve(mux, newAuthRequest(http.MethodGet, filesURL("/files/stat", dir), nil))
-	json.NewDecoder(w.Body).Decode(&entry)
+	if err := json.NewDecoder(w.Body).Decode(&entry); err != nil {
+		t.Fatal(err)
+	}
 	if w.Code != http.StatusOK || entry.Type != "dir" {
 		t.Errorf("stat of a directory: %d %+v", w.Code, entry)
 	}
@@ -380,6 +384,9 @@ func readNDJSON(t *testing.T, body io.Reader) map[string]FileEntry {
 			t.Fatalf("bad NDJSON line %q: %v", sc.Text(), err)
 		}
 		entries[e.Path] = e
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("scan: %v", err)
 	}
 	return entries
 }
@@ -426,35 +433,54 @@ func TestFilesErrors(t *testing.T) {
 	os.WriteFile(file, []byte("x"), 0o644)
 	missing := filepath.Join(dir, "missing")
 
-	get := func(route, path string, params ...string) *httptest.ResponseRecorder {
-		return serve(mux, newAuthRequest(http.MethodGet, filesURL(route, path, params...), nil))
+	// A directory the executor cannot read; permission bits don't bind root.
+	var forbidden string
+	if os.Geteuid() != 0 {
+		sub := filepath.Join(dir, "sub")
+		if err := os.Mkdir(sub, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		forbidden = filepath.Join(sub, "f")
 	}
 
-	tests := []struct {
+	type errCase struct {
 		name   string
-		w      *httptest.ResponseRecorder
+		method string
+		route  string
+		path   string
+		params []string
+		body   []byte
 		status int
-	}{
-		{"GET missing", get("/files", missing), http.StatusNotFound},
-		{"stat missing", get("/files/stat", missing), http.StatusNotFound},
-		{"list missing", get("/files/list", missing), http.StatusNotFound},
-		{"PUT missing parent", putFile(t, mux, filepath.Join(missing, "f"), []byte("x")), http.StatusNotFound},
-
-		{"PUT onto a directory", putFile(t, mux, dir, []byte("x")), http.StatusConflict},
-		{"PUT under a file", putFile(t, mux, filepath.Join(file, "f"), []byte("x")), http.StatusConflict},
-		{"PUT parents under a file",
-			putFile(t, mux, filepath.Join(file, "a", "f"), []byte("x"), "parents", "1"),
-			http.StatusConflict},
-
-		{"GET no path", serve(mux, newAuthRequest(http.MethodGet, "/files", nil)), http.StatusBadRequest},
-		{"GET a directory", get("/files", dir), http.StatusBadRequest},
-		{"list a file", get("/files/list", file), http.StatusBadRequest},
-		{"stat bad hash", get("/files/stat", file, "hash", "md5"), http.StatusBadRequest},
-		{"PUT bad mode", putFile(t, mux, file, []byte("x"), "mode", "rwx"), http.StatusBadRequest},
-		{"PUT mode out of range", putFile(t, mux, file, []byte("x"), "mode", "4755"), http.StatusBadRequest},
+	}
+	tests := []errCase{
+		{"GET missing", http.MethodGet, "/files", missing, nil, nil, http.StatusNotFound},
+		{"stat missing", http.MethodGet, "/files/stat", missing, nil, nil, http.StatusNotFound},
+		{"list missing", http.MethodGet, "/files/list", missing, nil, nil, http.StatusNotFound},
+		{"PUT missing parent", http.MethodPut, "/files",
+			filepath.Join(missing, "f"), nil, []byte("x"), http.StatusNotFound},
+		{"PUT onto a directory", http.MethodPut, "/files",
+			dir, nil, []byte("x"), http.StatusConflict},
+		{"PUT under a file", http.MethodPut, "/files",
+			filepath.Join(file, "f"), nil, []byte("x"), http.StatusConflict},
+		{"PUT parents under a file", http.MethodPut, "/files",
+			filepath.Join(file, "a", "f"), []string{"parents", "1"}, []byte("x"), http.StatusConflict},
+		{"GET no path", http.MethodGet, "/files", "", nil, nil, http.StatusBadRequest},
+		{"GET a directory", http.MethodGet, "/files", dir, nil, nil, http.StatusBadRequest},
+		{"list a file", http.MethodGet, "/files/list", file, nil, nil, http.StatusBadRequest},
+		{"stat bad hash", http.MethodGet, "/files/stat", file, []string{"hash", "md5"}, nil, http.StatusBadRequest},
+		{"PUT bad mode", http.MethodPut, "/files", file, []string{"mode", "rwx"}, []byte("x"), http.StatusBadRequest},
+		{"PUT mode out of range", http.MethodPut, "/files",
+			file, []string{"mode", "4755"}, []byte("x"), http.StatusBadRequest},
+	}
+	if forbidden != "" {
+		tests = append(tests, errCase{"GET forbidden", http.MethodGet, "/files",
+			forbidden, nil, nil, http.StatusForbidden})
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) { expectError(t, tt.w, tt.status) })
+		t.Run(tt.name, func(t *testing.T) {
+			req := newAuthRequest(tt.method, filesURL(tt.route, tt.path, tt.params...), tt.body)
+			expectError(t, serve(mux, req), tt.status)
+		})
 	}
 
 	req := newAuthRequest(http.MethodPut, filesURL("/files", file), []byte("x"))
