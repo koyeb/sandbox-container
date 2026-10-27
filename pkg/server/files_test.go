@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -300,6 +302,46 @@ func TestFilesGetPseudoFile(t *testing.T) {
 	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", "/proc/self/status"), nil))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Name:") {
 		t.Fatalf("expected a streamed /proc file, got %d %q", w.Code, w.Body.String())
+	}
+}
+
+// A FIFO or socket is refused without being opened: open(2) on a FIFO would
+// block until a writer appears, wedging the request instead of a 400.
+func TestFilesGetNonRegular(t *testing.T) {
+	_, mux := newTestServer(t)
+	dir := t.TempDir()
+
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", fifo), nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("GET fifo: expected 400, got %d", w.Code)
+	}
+
+	sock, err := filepath.Abs(filepath.Join(dir, "sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Skipf("unix socket: %v", err)
+	}
+	defer l.Close()
+	w = serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", sock), nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("GET socket: expected 400, got %d", w.Code)
+	}
+
+	// Stat reports the type instead of refusing the file.
+	w = serve(mux, newAuthRequest(http.MethodGet, filesURL("/files/stat", fifo), nil))
+	var entry FileEntry
+	if err := json.NewDecoder(w.Body).Decode(&entry); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusOK || entry.Type != "other" {
+		t.Fatalf("stat fifo: expected 200 other, got %d %+v", w.Code, entry)
 	}
 }
 

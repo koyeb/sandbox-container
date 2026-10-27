@@ -113,16 +113,11 @@ func (s *Server) getFileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(path)
+	// Stat before opening: open(2) on a FIFO would block until a writer
+	// appears, so the 400 for non-regular files has to come first.
+	info, err := os.Stat(path)
 	if err != nil {
-		slog.Debug("Failed to open file", "path", path, "error", err)
-		writeFSError(w, err)
-		return
-	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
+		slog.Debug("Failed to stat file", "path", path, "error", err)
 		writeFSError(w, err)
 		return
 	}
@@ -130,6 +125,14 @@ func (s *Server) getFileHandler(w http.ResponseWriter, r *http.Request) {
 		writeFileError(w, http.StatusBadRequest, fmt.Sprintf("%s is a %s, not a regular file", path, fileType(info.Mode())))
 		return
 	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		slog.Debug("Failed to open file", "path", path, "error", err)
+		writeFSError(w, err)
+		return
+	}
+	defer f.Close()
 
 	slog.Debug("Serving file", "path", path, "bytes", info.Size(), "range", r.Header.Get("Range"))
 	w.Header().Set("Content-Type", "application/octet-stream")
