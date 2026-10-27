@@ -680,6 +680,13 @@ func TestUploadsSpanCoalescing(t *testing.T) {
 	if len(spans) != 1 || spans[0] != (uploadSpan{Start: 0, End: 200}) {
 		t.Fatalf("ascending overlapping spans = %v, want one [0,200)", spans)
 	}
+
+	// Two ascending, merely adjacent spans coalesce with no overlap to glue
+	// them.
+	spans = addSpan(addSpan(nil, 0, 100), 100, 200)
+	if len(spans) != 1 || spans[0] != (uploadSpan{Start: 0, End: 200}) {
+		t.Fatalf("ascending adjacent spans = %v, want one [0,200)", spans)
+	}
 }
 
 // A session that cannot be recorded for the startup sweep must not open:
