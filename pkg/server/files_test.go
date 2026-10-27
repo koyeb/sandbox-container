@@ -305,14 +305,18 @@ func TestFilesStat(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 	var entry FileEntry
-	json.NewDecoder(w.Body).Decode(&entry)
+	if err := json.NewDecoder(w.Body).Decode(&entry); err != nil {
+		t.Fatal(err)
+	}
 	sum := sha256.Sum256([]byte("hello"))
 	if entry.Type != "file" || entry.Size != 5 || entry.Mode != "0640" || entry.MTime == "" || entry.SHA256 != hex.EncodeToString(sum[:]) {
 		t.Errorf("unexpected stat: %+v", entry)
 	}
 
 	w = serve(mux, newAuthRequest(http.MethodGet, filesURL("/files/stat", dir), nil))
-	json.NewDecoder(w.Body).Decode(&entry)
+	if err := json.NewDecoder(w.Body).Decode(&entry); err != nil {
+		t.Fatal(err)
+	}
 	if w.Code != http.StatusOK || entry.Type != "dir" {
 		t.Errorf("stat of a directory: %d %+v", w.Code, entry)
 	}
