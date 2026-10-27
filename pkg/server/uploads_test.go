@@ -267,6 +267,15 @@ func TestUploadsPartChecksum(t *testing.T) {
 		t.Fatalf("mismatched part recorded ranges: %v", ranges)
 	}
 
+	// A malformed checksum header is refused the same way and records
+	// nothing either.
+	if w := putUploadPart(mux, id, 0, content, "not-hex"); w.Code != http.StatusBadRequest {
+		t.Fatalf("malformed part checksum: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if ranges := decodeRanges(t, uploadStatus(mux, id)); len(ranges) != 0 {
+		t.Fatalf("malformed-checksum part recorded ranges: %v", ranges)
+	}
+
 	if w := putUploadPart(mux, id, 0, content, strings.ToUpper(hex.EncodeToString(good[:]))); w.Code != http.StatusNoContent {
 		t.Fatalf("matching part: expected 204, got %d: %s", w.Code, w.Body.String())
 	}
