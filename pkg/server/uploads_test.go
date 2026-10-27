@@ -99,6 +99,27 @@ func markerPathOf(srv *Server, id string) string {
 	return filepath.Join(srv.uploads.dir, id)
 }
 
+// newUploadsTestServerAt is newTestServer with the upload store pointed at
+// markerDir instead of the shared default: a store's construction sweeps its
+// marker dir, so concurrent test processes must not share one.
+func newUploadsTestServerAt(t *testing.T, markerDir string) (*Server, http.Handler) {
+	t.Helper()
+	srv, err := New(AuthConfig{
+		Mode:   AuthModeStatic,
+		Secret: "test-secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to create test server: %v", err)
+	}
+	srv.uploads = newUploadStore(markerDir)
+	return srv, srv.RegisterRoutes()
+}
+
+func newUploadsTestServer(t *testing.T) (*Server, http.Handler) {
+	t.Helper()
+	return newUploadsTestServerAt(t, filepath.Join(t.TempDir(), "markers"))
+}
+
 // endlessReader yields an infinite stream of one byte value without
 // allocating.
 type endlessReader struct{ b byte }
@@ -115,7 +136,7 @@ func (r endlessReader) Read(p []byte) (int, error) {
 // The core design case: parts out of order, in parallel, with a retried part
 // overwriting the same bytes, complete to a whole file.
 func TestUploadsOutOfOrderParallelRetriedParts(t *testing.T) {
-	_, mux := newTestServer(t)
+	_, mux := newUploadsTestServer(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "big.bin")
 
@@ -188,7 +209,7 @@ func TestUploadsOutOfOrderParallelRetriedParts(t *testing.T) {
 // Missing ranges at complete answer 409 with what is missing, and the session
 // stays resumable.
 func TestUploadsMissingRangesAtComplete(t *testing.T) {
-	_, mux := newTestServer(t)
+	_, mux := newUploadsTestServer(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f")
 
@@ -251,7 +272,7 @@ func TestUploadsMissingRangesAtComplete(t *testing.T) {
 // A part's X-Content-SHA256 is checked while streaming; a mismatch records
 // nothing.
 func TestUploadsPartChecksum(t *testing.T) {
-	_, mux := newTestServer(t)
+	_, mux := newUploadsTestServer(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f")
 
@@ -292,7 +313,7 @@ func TestUploadsPartChecksum(t *testing.T) {
 // streaming more bytes than the limit allows; a part crossing the upload
 // size is a 400.
 func TestUploadsPartTooLarge(t *testing.T) {
-	_, mux := newTestServer(t)
+	_, mux := newUploadsTestServer(t)
 	path := filepath.Join(t.TempDir(), "f")
 	id := openUpload(t, mux, map[string]any{"path": path, "size": maxUploadPartSize + 4096})
 
@@ -372,7 +393,7 @@ func TestUploadsPartTooLarge(t *testing.T) {
 // The optional whole-file sha256 is checked at complete; a mismatch leaves
 // the destination untouched and sweeps the session.
 func TestUploadsCompleteChecksum(t *testing.T) {
-	_, mux := newTestServer(t)
+	_, mux := newUploadsTestServer(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f")
 
@@ -416,7 +437,7 @@ func TestUploadsCompleteChecksum(t *testing.T) {
 // Mode at open is applied at complete; without one, an existing
 // destination's mode is carried over, and a new file gets 0644.
 func TestUploadsModes(t *testing.T) {
-	_, mux := newTestServer(t)
+	_, mux := newUploadsTestServer(t)
 	dir := t.TempDir()
 
 	explicit := filepath.Join(dir, "explicit")
@@ -454,7 +475,7 @@ func TestUploadsModes(t *testing.T) {
 // Abort removes the session, its temp file and its marker; everything after
 // is a 404.
 func TestUploadsAbort(t *testing.T) {
-	srv, mux := newTestServer(t)
+	srv, mux := newUploadsTestServer(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f")
 
@@ -487,7 +508,7 @@ func TestUploadsAbort(t *testing.T) {
 
 // Open and part validation, and unknown sessions.
 func TestUploadsValidation(t *testing.T) {
-	_, mux := newTestServer(t)
+	_, mux := newUploadsTestServer(t)
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, "d"), 0o755); err != nil {
 		t.Fatal(err)
@@ -557,7 +578,7 @@ func TestUploadsValidation(t *testing.T) {
 // via the janitor when abandoned — taking their temp file and marker with
 // them.
 func TestUploadsExpiry(t *testing.T) {
-	srv, mux := newTestServer(t)
+	srv, mux := newUploadsTestServer(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f")
 
@@ -607,7 +628,7 @@ func TestUploadsExpiry(t *testing.T) {
 // chunk that lands counts as activity, so a slow client is never expired
 // mid-copy.
 func TestUploadsSlowPartKeepsSessionAlive(t *testing.T) {
-	srv, mux := newTestServer(t)
+	srv, mux := newUploadsTestServer(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f")
 
@@ -634,14 +655,13 @@ func TestUploadsSlowPartKeepsSessionAlive(t *testing.T) {
 // A session that cannot be recorded for the startup sweep must not open:
 // its temp file would outlive the run with no marker to find it.
 func TestUploadsOpenWithoutMarkerFails(t *testing.T) {
-	markers := filepath.Join(os.TempDir(), "koyeb-file-uploads")
-	os.RemoveAll(markers)
+	// The marker registry cannot be created: a file sits where its dir goes.
+	markers := filepath.Join(t.TempDir(), "markers")
 	if err := os.WriteFile(markers, []byte("not a dir"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(markers)
 
-	_, mux := newTestServer(t)
+	_, mux := newUploadsTestServerAt(t, markers)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f")
 
@@ -675,7 +695,7 @@ func TestUploadsRestartSweepsOrphanedTempFiles(t *testing.T) {
 	}
 
 	// A fresh executor loses the previous run's live sessions.
-	srvA, muxA := newTestServer(t)
+	srvA, muxA := newUploadsTestServerAt(t, markers)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f")
 	id := openUpload(t, muxA, map[string]any{"path": path, "size": 4096})
@@ -684,7 +704,7 @@ func TestUploadsRestartSweepsOrphanedTempFiles(t *testing.T) {
 	if _, err := os.Stat(markerPathOf(srvA, id)); err != nil {
 		t.Fatalf("marker not created: %v", err)
 	}
-	_, _ = newTestServer(t) // the restarted executor
+	_, _ = newUploadsTestServerAt(t, markers) // the restarted executor
 	if tmp := listTempFiles(t, dir); len(tmp) != 0 {
 		t.Errorf("restart left the previous run's temp file: %v", tmp)
 	}
@@ -695,7 +715,7 @@ func TestUploadsRestartSweepsOrphanedTempFiles(t *testing.T) {
 
 // A zero-size upload completes without parts.
 func TestUploadsZeroSize(t *testing.T) {
-	_, mux := newTestServer(t)
+	_, mux := newUploadsTestServer(t)
 	path := filepath.Join(t.TempDir(), "empty")
 	id := openUpload(t, mux, map[string]any{"path": path, "size": 0})
 
