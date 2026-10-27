@@ -252,7 +252,7 @@ the executor's memory does not grow with the file size. They are the routes to u
 | `400 Bad Request` | missing `path`, invalid parameter or header, a body that ended early, a checksum mismatch, a directory where a file is expected (or the reverse) |
 | `403 Forbidden` | permission denied |
 | `404 Not Found` | the path, or a parent directory, does not exist |
-| `409 Conflict` | something is in the way: a `PUT` onto a directory, or a parent that is a file |
+| `409 Conflict` | something is in the way: a `PUT` onto a directory, a parent that is a file, or a symlink chain too long to resolve |
 | `500 Internal Server Error` | any other filesystem error (e.g. disk full) |
 
 ---
@@ -379,7 +379,7 @@ directory's direct entries are listed.
 - Fields are the same as [Stat File](#stat-file), without `sha256`
 - Symlinks inside the directory are listed, never followed; `path` itself may be a symlink to a directory
 - `400` if `path` is not a directory. Once the listing has started, an entry that can't be read (e.g. a
-  subdirectory without read permission) is listed as `{"path": "...", "error": "..."}` and the listing goes on
+  subdirectory without read permission) is listed as `{"path": "...", "size": 0, "error": "..."}` and the listing goes on
 
 **Example:**
 ```bash

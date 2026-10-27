@@ -7,14 +7,20 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func filesURL(route, path string, params ...string) string {
@@ -387,6 +393,7 @@ func TestFilesErrors(t *testing.T) {
 		{"PUT parents under a file", putFile(t, mux, filepath.Join(file, "a", "f"), []byte("x"), "parents", "1"), http.StatusConflict},
 
 		{"GET no path", serve(mux, newAuthRequest(http.MethodGet, "/files", nil)), http.StatusBadRequest},
+		{"PUT no path", serve(mux, newAuthRequest(http.MethodPut, "/files", nil)), http.StatusBadRequest},
 		{"GET a directory", get("/files", dir), http.StatusBadRequest},
 		{"list a file", get("/files/list", file), http.StatusBadRequest},
 		{"stat bad hash", get("/files/stat", file, "hash", "md5"), http.StatusBadRequest},
@@ -408,5 +415,228 @@ func TestFilesErrors(t *testing.T) {
 	}
 	if w := serve(mux, newAuthRequest(http.MethodPost, filesURL("/files", file), nil)); w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST /files: %d", w.Code)
+	}
+}
+
+// GET on a writer-less FIFO must return the documented 400, not block in
+// open() holding the handler and its connection forever.
+func TestFilesGetFIFO(t *testing.T) {
+	_, mux := newTestServer(t)
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := newAuthRequest(http.MethodGet, filesURL("/files", fifo), nil)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- serve(mux, req) }()
+	select {
+	case w := <-done:
+		expectError(t, w, http.StatusBadRequest)
+	case <-time.After(3 * time.Second):
+		t.Fatal("GET on a FIFO did not return; the handler blocked in open()")
+	}
+}
+
+// GET on a unix socket path is rejected before the open, like other special
+// files.
+func TestFilesGetSocket(t *testing.T) {
+	_, mux := newTestServer(t)
+	sock := filepath.Join(t.TempDir(), "sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Skipf("unix sockets unavailable: %v", err)
+	}
+	defer ln.Close()
+	expectError(t, serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", sock), nil)), http.StatusBadRequest)
+}
+
+// A symlink chain longer than the kernel's limit fails the way the kernel
+// would, instead of silently overwriting one of the links.
+func TestFilesPutSymlinkChainTooLong(t *testing.T) {
+	_, mux := newTestServer(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "file")
+
+	// 41 links: resolving the outermost is one hop too many.
+	tooLong := target
+	for i := 1; i <= 41; i++ {
+		p := filepath.Join(dir, fmt.Sprintf("a%d", i))
+		if err := os.Symlink(tooLong, p); err != nil {
+			t.Fatal(err)
+		}
+		tooLong = p
+	}
+	expectError(t, putFile(t, mux, tooLong, []byte("new")), http.StatusConflict)
+	if fi, err := os.Lstat(filepath.Join(dir, "a1")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the last link of the chain was replaced")
+	}
+	if tmp := listTempFiles(t, dir); len(tmp) != 0 {
+		t.Errorf("temp files left behind: %v", tmp)
+	}
+
+	// A chain within the limit still writes through to the target — also
+	// when the target already exists, so the chain resolves to a real file.
+	os.WriteFile(target, []byte("old"), 0o644)
+	within := target
+	for i := 1; i <= 40; i++ {
+		p := filepath.Join(dir, fmt.Sprintf("b%d", i))
+		if err := os.Symlink(within, p); err != nil {
+			t.Fatal(err)
+		}
+		within = p
+	}
+	if w := putFile(t, mux, within, []byte("ok")); w.Code != http.StatusOK {
+		t.Fatalf("40-hop chain: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got, _ := os.ReadFile(target); string(got) != "ok" {
+		t.Errorf("target holds %q", got)
+	}
+}
+
+// mode= accepts the full range of permission bits, including both edges.
+func TestFilesPutModeBoundaries(t *testing.T) {
+	_, mux := newTestServer(t)
+	for _, m := range []string{"0777", "0000"} {
+		path := filepath.Join(t.TempDir(), "f")
+		if w := putFile(t, mux, path, []byte("x"), "mode", m); w.Code != http.StatusOK {
+			t.Fatalf("mode=%s: expected 200, got %d: %s", m, w.Code, w.Body.String())
+		}
+		want, _ := strconv.ParseUint(m, 8, 32)
+		if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != fs.FileMode(want) {
+			t.Errorf("mode=%s gave %o", m, fi.Mode().Perm())
+		}
+	}
+}
+
+// mode= is honored even when the destination already exists: the file's
+// current mode doesn't override it.
+func TestFilesPutModeOnOverwrite(t *testing.T) {
+	_, mux := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "f")
+	os.WriteFile(path, []byte("first"), 0o644)
+
+	if w := putFile(t, mux, path, []byte("second"), "mode", "0600"); w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("mode on overwrite: %v %o", err, fi.Mode().Perm())
+	}
+}
+
+// A file that reports size 0 but has content (a Linux /proc file) is
+// streamed to the end, without a Content-Length or ETag.
+func TestFilesGetPseudoFileContent(t *testing.T) {
+	if _, err := os.Stat("/proc/self/status"); err != nil {
+		t.Skip("no /proc pseudo-files on this system")
+	}
+	_, mux := newTestServer(t)
+	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", "/proc/self/status"), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /proc/self/status: %d", w.Code)
+	}
+	if w.Body.Len() == 0 {
+		t.Error("the pseudo-file streamed no content")
+	}
+	if w.Header().Get("Content-Length") != "" || w.Header().Get("ETag") != "" {
+		t.Errorf("the pseudo-file path set validators: %v", w.Header())
+	}
+}
+
+// A checksum header that is hex but not 64 characters is rejected before
+// anything is written.
+func TestFilesPutBadChecksumLength(t *testing.T) {
+	_, mux := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "f")
+	req := newAuthRequest(http.MethodPut, filesURL("/files", path), []byte("x"))
+	req.Header.Set("X-Content-SHA256", "deadbeef")
+	expectError(t, serve(mux, req), http.StatusBadRequest)
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Error("the file was written despite the bad checksum")
+	}
+}
+
+// A file that reports size 0 is streamed without a length or validators:
+// no ETag, Content-Length or Last-Modified, and HEAD writes no body.
+func TestFilesGetPseudoFileHeaders(t *testing.T) {
+	_, mux := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "empty")
+	os.WriteFile(path, nil, 0o644)
+
+	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", path), nil))
+	if w.Code != http.StatusOK || w.Body.Len() != 0 {
+		t.Fatalf("GET empty: %d %q", w.Code, w.Body.String())
+	}
+	if w.Header().Get("ETag") != "" || w.Header().Get("Content-Length") != "" || w.Header().Get("Last-Modified") != "" {
+		t.Errorf("the size-0 path set validators: %v", w.Header())
+	}
+
+	head := serve(mux, newAuthRequest(http.MethodHead, filesURL("/files", path), nil))
+	if head.Code != http.StatusOK || head.Body.Len() != 0 {
+		t.Errorf("HEAD empty: %d %q", head.Code, head.Body.String())
+	}
+}
+
+// An entry the walk cannot read is listed with its error — path, a zero
+// size, no type — and the walk goes on.
+func TestFilesListErrorEntry(t *testing.T) {
+	_, mux := newTestServer(t)
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "top.txt"), []byte("x"), 0o644)
+	sub := filepath.Join(dir, "sub")
+	os.Mkdir(sub, 0o755)
+	os.WriteFile(filepath.Join(sub, "inner.txt"), []byte("y"), 0o644)
+	if err := os.Chmod(sub, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(sub, 0o755) })
+
+	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files/list", dir, "recursive", "1"), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list: %d", w.Code)
+	}
+	body := w.Body.Bytes()
+	entries := readNDJSON(t, bytes.NewReader(body))
+	if entries["top.txt"].Type != "file" {
+		t.Errorf("top.txt missing from the listing: %+v", entries)
+	}
+
+	sawError := false
+	sc := bufio.NewScanner(bytes.NewReader(body))
+	for sc.Scan() {
+		if !strings.Contains(sc.Text(), `"error"`) {
+			continue
+		}
+		sawError = true
+		var e FileEntry
+		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
+			t.Fatalf("bad error entry %q: %v", sc.Text(), err)
+		}
+		if e.Path != "sub" || e.Error == "" || e.Size != 0 || e.Type != "" {
+			t.Errorf("error entry shape: %+v", e)
+		}
+	}
+	if !sawError {
+		t.Errorf("no error entry in the listing:\n%s", w.Body.String())
+	}
+}
+
+// stat reports special files as type "other": it stats them, and never
+// follows them into a blocking read.
+func TestFilesStatSpecial(t *testing.T) {
+	_, mux := newTestServer(t)
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var entry FileEntry
+	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files/stat", fifo), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("stat FIFO: %d %s", w.Code, w.Body.String())
+	}
+	if err := json.NewDecoder(w.Body).Decode(&entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Type != "other" {
+		t.Errorf("stat FIFO type %q, expected other", entry.Type)
 	}
 }
