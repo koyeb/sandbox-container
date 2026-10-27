@@ -61,8 +61,7 @@ func fsErrorStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, fs.ErrPermission):
 		return http.StatusForbidden
-	case errors.Is(err, fs.ErrExist),
-		errors.Is(err, syscall.ENOTDIR),
+	case errors.Is(err, syscall.ENOTDIR),
 		errors.Is(err, syscall.EISDIR),
 		errors.Is(err, syscall.ENOTEMPTY):
 		return http.StatusConflict
@@ -141,7 +140,9 @@ func (s *Server) getFileHandler(w http.ResponseWriter, r *http.Request) {
 	// them as they read, without a length, a validator or Range.
 	if info.Size() == 0 {
 		if r.Method != http.MethodHead {
-			io.Copy(w, f)
+			if _, err := io.Copy(w, f); err != nil {
+				slog.Debug("Failed to stream file", "path", path, "error", err)
+			}
 		}
 		return
 	}
