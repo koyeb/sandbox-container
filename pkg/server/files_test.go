@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -285,6 +286,20 @@ func TestFilesGetEmptyFile(t *testing.T) {
 	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", path), nil))
 	if w.Code != http.StatusOK || w.Body.Len() != 0 {
 		t.Fatalf("expected an empty 200, got %d %q", w.Code, w.Body.String())
+	}
+}
+
+// /proc files stat as size 0 yet have content: the size-0 path must
+// stream what it reads, not an empty body.
+func TestFilesGetPseudoFile(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("/proc only exists on linux")
+	}
+	_, mux := newTestServer(t)
+
+	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", "/proc/self/status"), nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Name:") {
+		t.Fatalf("expected a streamed /proc file, got %d %q", w.Code, w.Body.String())
 	}
 }
 
