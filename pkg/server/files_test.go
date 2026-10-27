@@ -729,3 +729,29 @@ func TestFilesPutDefaultMode(t *testing.T) {
 		t.Errorf("default mode %o, expected 0644", fi.Mode().Perm())
 	}
 }
+
+// GET and stat follow symlinks: this is what a download would return.
+func TestFilesGetThroughSymlink(t *testing.T) {
+	_, mux := newTestServer(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	link := filepath.Join(dir, "link")
+	os.WriteFile(target, []byte("hello"), 0o644)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", link), nil))
+	if w.Code != http.StatusOK || w.Body.String() != "hello" {
+		t.Fatalf("GET through a symlink: %d %q", w.Code, w.Body.String())
+	}
+
+	var entry FileEntry
+	w = serve(mux, newAuthRequest(http.MethodGet, filesURL("/files/stat", link), nil))
+	if err := json.NewDecoder(w.Body).Decode(&entry); err != nil {
+		t.Fatalf("bad stat body %q: %v", w.Body.String(), err)
+	}
+	if w.Code != http.StatusOK || entry.Type != "file" || entry.Size != 5 {
+		t.Errorf("stat through a symlink: %d %+v", w.Code, entry)
+	}
+}
