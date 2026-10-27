@@ -85,6 +85,19 @@ func pathParam(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return filepath.Clean(p), true
 }
 
+// flagParam reads an optional boolean query parameter: absent is false, "1"
+// is true, anything else is a 400, never a silently ignored typo.
+func flagParam(r *http.Request, name string) (bool, error) {
+	switch r.URL.Query().Get(name) {
+	case "":
+		return false, nil
+	case "1":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s must be 1", name)
+	}
+}
+
 func fileType(mode fs.FileMode) string {
 	switch {
 	case mode.IsRegular():
@@ -253,7 +266,12 @@ type putParams struct {
 // parsePutParams validates the optional mode, parents and X-Content-SHA256
 // of a PUT. mode is the default 0644 unless mode= was given.
 func parsePutParams(r *http.Request) (putParams, error) {
-	p := putParams{mode: 0o644, parents: r.URL.Query().Get("parents") == "1"}
+	p := putParams{mode: 0o644}
+	parents, err := flagParam(r, "parents")
+	if err != nil {
+		return putParams{}, err
+	}
+	p.parents = parents
 	if m := r.URL.Query().Get("mode"); m != "" {
 		v, err := strconv.ParseUint(m, 8, 32)
 		if err != nil || v > 0o777 {
@@ -381,6 +399,52 @@ func commitTempFile(tmp *os.File, path string, mode fs.FileMode) error {
 	return nil
 }
 
+// isTempName reports whether name has the shape the PUT temps get from
+// os.CreateTemp: hidden, and ending in tempMarker plus digits. A user
+// file that merely mentions the marker is not the sweep's to take.
+func isTempName(name string) bool {
+	i := strings.LastIndex(name, tempMarker)
+	return strings.HasPrefix(name, ".") && i >= 0 && isDigits(name[i+len(tempMarker):])
+}
+
+// isDigits reports whether s is one or more ASCII decimal digits — the
+// only tail os.CreateTemp leaves behind.
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// SweepOrphanedTemps removes the PUT temp files a previous run crashed
+// without cleaning up: they sit next to their destination as
+// .<name>.koyeb-tmp-* and would linger as regular entries in listings. The
+// walk does not follow symlinks, and a file it cannot remove is logged and
+// skipped, so a locked orphan never blocks the startup.
+func SweepOrphanedTemps(root string) {
+	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			slog.Debug("Temp sweep skipped a directory", "path", p, "error", err)
+			return nil
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		if !isTempName(d.Name()) {
+			return nil
+		}
+		if err := os.Remove(p); err != nil {
+			slog.Debug("Temp sweep failed to remove an orphan", "path", p, "error", err)
+		}
+		return nil
+	})
+}
+
 func (s *Server) statFileHandler(w http.ResponseWriter, r *http.Request) {
 	path, ok := pathParam(w, r)
 	if !ok {
@@ -435,7 +499,11 @@ func (s *Server) listFilesHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	recursive := r.URL.Query().Get("recursive") == "1"
+	recursive, err := flagParam(r, "recursive")
+	if err != nil {
+		writeFileError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	info, err := os.Stat(root)
 	if err != nil {

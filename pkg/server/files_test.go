@@ -406,6 +406,8 @@ func TestFilesErrors(t *testing.T) {
 		{"stat bad hash", get("/files/stat", file, "hash", "md5"), http.StatusBadRequest},
 		{"PUT bad mode", putFile(t, mux, file, []byte("x"), "mode", "rwx"), http.StatusBadRequest},
 		{"PUT mode out of range", putFile(t, mux, file, []byte("x"), "mode", "4755"), http.StatusBadRequest},
+		{"PUT bad parents", putFile(t, mux, file, []byte("x"), "parents", "yes"), http.StatusBadRequest},
+		{"list bad recursive", get("/files/list", dir, "recursive", "true"), http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { expectError(t, c.w, c.status) })
@@ -775,4 +777,54 @@ func TestFilesPutForbidden(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectError(t, putFile(t, mux, filepath.Join(dir, "f"), []byte("x")), http.StatusForbidden)
+}
+
+// A crashed PUT leaves its temp next to the destination; the next run sweeps
+// it from the working directory down — and only it.
+func TestSweepOrphanedTemps(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "sub"), 0o755)
+	orphan := filepath.Join(dir, "sub", ".data.bin.koyeb-tmp-1290")
+	os.WriteFile(orphan, []byte("x"), 0o644)
+	linked := filepath.Join(dir, ".through-a-link.koyeb-tmp-1")
+	if err := os.Symlink(filepath.Join(dir, "sub"), linked); err != nil {
+		t.Fatal(err)
+	}
+	// A temp with no destination name still has the documented shape.
+	bareTemp := filepath.Join(dir, ".koyeb-tmp-7")
+	if err := os.WriteFile(bareTemp, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(dir, "data.bin")
+	os.WriteFile(keep, []byte("x"), 0o644)
+	// User files that merely mention the marker: the tail os.CreateTemp
+	// leaves is always digits, so neither is a temp.
+	lookalike := filepath.Join(dir, ".draft.koyeb-tmp-old")
+	if err := os.WriteFile(lookalike, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bareTail := filepath.Join(dir, ".bare.koyeb-tmp-")
+	if err := os.WriteFile(bareTail, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	SweepOrphanedTemps(dir)
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Error("the orphaned temp file survived the sweep")
+	}
+	if _, err := os.Lstat(linked); err != nil {
+		t.Errorf("the sweep followed or removed a symlink: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Error("the sweep removed a real file")
+	}
+	if _, err := os.Stat(lookalike); err != nil {
+		t.Error("the sweep removed a lookalike user file")
+	}
+	if _, err := os.Stat(bareTail); err != nil {
+		t.Error("the sweep removed an empty-tailed user file")
+	}
+	if _, err := os.Stat(bareTemp); !errors.Is(err, os.ErrNotExist) {
+		t.Error("a bare-marker temp survived the sweep")
+	}
 }
