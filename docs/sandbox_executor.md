@@ -307,7 +307,7 @@ the destination. A request that fails or ends early leaves the destination as it
 - `mode` (optional): octal permission bits, `0000` to `0777`, e.g. `0755`. Default: the existing file's mode when
   replacing one, else `0644`
 - `parents=1` (optional): create missing parent directories (`0755`), like `mkdir -p`. Without it, a missing
-  parent is a `404`
+  parent is a `404`. Only `1` is accepted; any other value is a `400`
 
 **Request headers:**
 - `X-Content-SHA256` (optional): the hex sha256 of the body. It is computed while the body streams and checked
@@ -366,7 +366,7 @@ curl -H "Authorization: Bearer your-secret" \
 
 **Description:** Lists a directory as NDJSON (`Content-Type: application/x-ndjson`): one JSON object per line,
 written as the directory is read, so a large tree is never built in memory. Without `recursive=1`, only the
-directory's direct entries are listed.
+directory's direct entries are listed. Only `1` is accepted; any other value is a `400`.
 
 **Response:** one line per entry, in lexical order, the directory itself excluded:
 ```

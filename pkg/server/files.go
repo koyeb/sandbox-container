@@ -79,6 +79,19 @@ func pathParam(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return filepath.Clean(p), true
 }
 
+// flagParam reads an optional boolean query parameter: absent is false, "1"
+// is true, anything else is a 400, never a silently ignored typo.
+func flagParam(r *http.Request, name string) (bool, error) {
+	switch r.URL.Query().Get(name) {
+	case "":
+		return false, nil
+	case "1":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s must be 1", name)
+	}
+}
+
 func fileType(mode fs.FileMode) string {
 	switch {
 	case mode.IsRegular():
@@ -247,7 +260,12 @@ type putParams struct {
 // parsePutParams validates the optional mode, parents and X-Content-SHA256
 // of a PUT. mode is the default 0644 unless mode= was given.
 func parsePutParams(r *http.Request) (putParams, error) {
-	p := putParams{mode: 0o644, parents: r.URL.Query().Get("parents") == "1"}
+	p := putParams{mode: 0o644}
+	parents, err := flagParam(r, "parents")
+	if err != nil {
+		return putParams{}, err
+	}
+	p.parents = parents
 	if m := r.URL.Query().Get("mode"); m != "" {
 		v, err := strconv.ParseUint(m, 8, 32)
 		if err != nil || v > 0o777 {
@@ -429,7 +447,11 @@ func (s *Server) listFilesHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	recursive := r.URL.Query().Get("recursive") == "1"
+	recursive, err := flagParam(r, "recursive")
+	if err != nil {
+		writeFileError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	info, err := os.Stat(root)
 	if err != nil {

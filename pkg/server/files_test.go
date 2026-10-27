@@ -406,6 +406,8 @@ func TestFilesErrors(t *testing.T) {
 		{"stat bad hash", get("/files/stat", file, "hash", "md5"), http.StatusBadRequest},
 		{"PUT bad mode", putFile(t, mux, file, []byte("x"), "mode", "rwx"), http.StatusBadRequest},
 		{"PUT mode out of range", putFile(t, mux, file, []byte("x"), "mode", "4755"), http.StatusBadRequest},
+		{"PUT bad parents", putFile(t, mux, file, []byte("x"), "parents", "yes"), http.StatusBadRequest},
+		{"list bad recursive", get("/files/list", dir, "recursive", "true"), http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { expectError(t, c.w, c.status) })
