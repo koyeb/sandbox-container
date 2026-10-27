@@ -68,8 +68,8 @@ func TestFilesBinaryRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "all-bytes.bin")
 
 	content := make([]byte, 0, 256*4)
-	for i := 0; i < 4; i++ {
-		for b := 0; b < 256; b++ {
+	for range 4 {
+		for b := range 256 {
 			content = append(content, byte(b))
 		}
 	}
@@ -305,14 +305,18 @@ func TestFilesStat(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 	var entry FileEntry
-	json.NewDecoder(w.Body).Decode(&entry)
+	if err := json.NewDecoder(w.Body).Decode(&entry); err != nil {
+		t.Fatal(err)
+	}
 	sum := sha256.Sum256([]byte("hello"))
 	if entry.Type != "file" || entry.Size != 5 || entry.Mode != "0640" || entry.MTime == "" || entry.SHA256 != hex.EncodeToString(sum[:]) {
 		t.Errorf("unexpected stat: %+v", entry)
 	}
 
 	w = serve(mux, newAuthRequest(http.MethodGet, filesURL("/files/stat", dir), nil))
-	json.NewDecoder(w.Body).Decode(&entry)
+	if err := json.NewDecoder(w.Body).Decode(&entry); err != nil {
+		t.Fatal(err)
+	}
 	if w.Code != http.StatusOK || entry.Type != "dir" {
 		t.Errorf("stat of a directory: %d %+v", w.Code, entry)
 	}
@@ -328,6 +332,9 @@ func readNDJSON(t *testing.T, body io.Reader) map[string]FileEntry {
 			t.Fatalf("bad NDJSON line %q: %v", sc.Text(), err)
 		}
 		entries[e.Path] = e
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("reading the listing stopped early: %v", err)
 	}
 	return entries
 }
@@ -639,4 +646,133 @@ func TestFilesStatSpecial(t *testing.T) {
 	if entry.Type != "other" {
 		t.Errorf("stat FIFO type %q, expected other", entry.Type)
 	}
+}
+
+// fsErrorStatus is the wire contract the SDKs code against: pin every
+// row, including the two that had no test until now (403, 500).
+func TestFilesErrorStatusMap(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"missing", fs.ErrNotExist, http.StatusNotFound},
+		{"permission denied", fs.ErrPermission, http.StatusForbidden},
+		{"destination is a directory", errDestIsDir, http.StatusConflict},
+		{"already exists", fs.ErrExist, http.StatusConflict},
+		{"parent is a file", syscall.ENOTDIR, http.StatusConflict},
+		{"read of a directory", syscall.EISDIR, http.StatusConflict},
+		{"directory not empty", syscall.ENOTEMPTY, http.StatusConflict},
+		{"symlink chain too long", syscall.ELOOP, http.StatusConflict},
+		{"disk full", syscall.ENOSPC, http.StatusInternalServerError},
+		{"anything else", errors.New("unexpected"), http.StatusInternalServerError},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := fsErrorStatus(c.err); got != c.want {
+				t.Fatalf("fsErrorStatus(%v) = %d, want %d", c.err, got, c.want)
+			}
+		})
+	}
+}
+
+// A file the executor cannot read answers with the documented 403.
+func TestFilesGetForbidden(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses permission bits; no 403 to observe")
+	}
+	_, mux := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "locked")
+	os.WriteFile(path, []byte("x"), 0o644)
+	t.Cleanup(func() { os.Chmod(path, 0o644) })
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	expectError(t, serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", path), nil)), http.StatusForbidden)
+}
+
+// A current If-None-Match saves the transfer: 304, no body.
+func TestFilesGetNotModified(t *testing.T) {
+	_, mux := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "f")
+	os.WriteFile(path, []byte("hello"), 0o644)
+
+	head := serve(mux, newAuthRequest(http.MethodHead, filesURL("/files", path), nil))
+	etag := head.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("HEAD returned no ETag")
+	}
+
+	req := newAuthRequest(http.MethodGet, filesURL("/files", path), nil)
+	req.Header.Set("If-None-Match", etag)
+	if w := serve(mux, req); w.Code != http.StatusNotModified {
+		t.Fatalf("If-None-Match current: %d", w.Code)
+	} else if w.Body.Len() != 0 {
+		t.Errorf("304 carried a body: %q", w.Body.String())
+	}
+
+	req = newAuthRequest(http.MethodGet, filesURL("/files", path), nil)
+	req.Header.Set("If-None-Match", `"stale"`)
+	if w := serve(mux, req); w.Code != http.StatusOK || w.Body.String() != "hello" {
+		t.Fatalf("If-None-Match stale: %d %q", w.Code, w.Body.String())
+	}
+}
+
+// A PUT without mode= creates the file with the documented default, 0644.
+func TestFilesPutDefaultMode(t *testing.T) {
+	_, mux := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "f")
+	if w := putFile(t, mux, path, []byte("x")); w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Errorf("default mode %o, expected 0644", fi.Mode().Perm())
+	}
+}
+
+// GET and stat follow symlinks: this is what a download would return.
+func TestFilesGetThroughSymlink(t *testing.T) {
+	_, mux := newTestServer(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	link := filepath.Join(dir, "link")
+	os.WriteFile(target, []byte("hello"), 0o644)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", link), nil))
+	if w.Code != http.StatusOK || w.Body.String() != "hello" {
+		t.Fatalf("GET through a symlink: %d %q", w.Code, w.Body.String())
+	}
+
+	var entry FileEntry
+	w = serve(mux, newAuthRequest(http.MethodGet, filesURL("/files/stat", link), nil))
+	if err := json.NewDecoder(w.Body).Decode(&entry); err != nil {
+		t.Fatalf("bad stat body %q: %v", w.Body.String(), err)
+	}
+	if w.Code != http.StatusOK || entry.Type != "file" || entry.Size != 5 {
+		t.Errorf("stat through a symlink: %d %+v", w.Code, entry)
+	}
+}
+
+// A PUT into a directory the executor cannot write answers 403 as well.
+func TestFilesPutForbidden(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses permission bits; no 403 to observe")
+	}
+	_, mux := newTestServer(t)
+	dir := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	expectError(t, putFile(t, mux, filepath.Join(dir, "f"), []byte("x")), http.StatusForbidden)
 }

@@ -17,6 +17,66 @@ import (
 	"github.com/koyeb/sandbox-container/pkg/logger"
 )
 
+// writeJSON answers with status and a JSON body. Encode's error is
+// dropped: once the status is committed, nothing is left to do with it.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+// writeResult answers with the JSON routes' result envelope: 200 with
+// {"success": bool, "error": ...}. Old clients read the envelope, not the
+// status code.
+func writeResult(w http.ResponseWriter, err error) {
+	resp := map[string]any{"success": err == nil}
+	if err != nil {
+		resp["error"] = err.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// commandEnv returns the environment a command runs with: the current one
+// plus the request's additions. nil means inherit unchanged.
+func commandEnv(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	e := os.Environ()
+	for key, value := range env {
+		e = append(e, key+"="+value)
+	}
+	return e
+}
+
+// checkCwd answers the request with a 400 when cwd is not a usable working
+// directory; an empty cwd means the command's default.
+func checkCwd(w http.ResponseWriter, cwd string) bool {
+	if cwd == "" {
+		return true
+	}
+	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+		http.Error(w, fmt.Sprintf("Invalid working directory: %s", cwd), http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// cancelProcessGroup returns the Cancel that kills a command's whole
+// process group when its context ends, so children can't outlive it holding
+// pipes open.
+func cancelProcessGroup(cmd *exec.Cmd) func() error {
+	return func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		return nil
+	}
+}
+
 // sseWriter provides thread-safe writing for Server-Sent Events
 type sseWriter struct {
 	w        http.ResponseWriter
@@ -66,7 +126,7 @@ func (s *sseWriter) writeEvent(event, data string) {
 	}
 }
 
-func (s *sseWriter) writeEventf(event, format string, args ...interface{}) {
+func (s *sseWriter) writeEventf(event, format string, args ...any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fmt.Fprintf(s.w, "event: %s\ndata: ", event)
@@ -142,11 +202,8 @@ func (s *Server) runHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Cwd != "" {
-		if info, err := os.Stat(req.Cwd); err != nil || !info.IsDir() {
-			http.Error(w, fmt.Sprintf("Invalid working directory: %s", req.Cwd), http.StatusBadRequest)
-			return
-		}
+	if !checkCwd(w, req.Cwd) {
+		return
 	}
 
 	slog.Debug("Executing command", "cmd", req.Cmd, "cwd", req.Cwd, "env", req.Env)
@@ -156,22 +213,14 @@ func (s *Server) runHandler(w http.ResponseWriter, r *http.Request) {
 	// running and holding the output pipes open, so Wait would not return.
 	cmd := exec.CommandContext(r.Context(), "sh", "-c", req.Cmd)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	cmd.Cancel = cancelProcessGroup(cmd)
 
 	// Set working directory if provided
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	}
 
-	// Set environment variables if provided
-	if len(req.Env) > 0 {
-		cmd.Env = os.Environ()
-		for key, value := range req.Env {
-			cmd.Env = append(cmd.Env, key+"="+value)
-		}
-	}
+	cmd.Env = commandEnv(req.Env)
 
 	// Let os/exec drain stdout and stderr concurrently: reading one pipe to EOF
 	// before the other deadlocks once the command fills the other pipe's buffer.
@@ -201,8 +250,7 @@ func (s *Server) runHandler(w http.ResponseWriter, r *http.Request) {
 	if exitCode != 0 {
 		resp.Error = "Non-zero exit code"
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // Process management handlers
@@ -237,11 +285,8 @@ func (s *Server) startProcessHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Cwd != "" {
-		if info, err := os.Stat(req.Cwd); err != nil || !info.IsDir() {
-			http.Error(w, fmt.Sprintf("Invalid working directory: %s", req.Cwd), http.StatusBadRequest)
-			return
-		}
+	if !checkCwd(w, req.Cwd) {
+		return
 	}
 
 	slog.Debug("Start process request", "cmd", req.Cmd, "cwd", req.Cwd, "env", req.Env)
@@ -249,12 +294,7 @@ func (s *Server) startProcessHandler(w http.ResponseWriter, r *http.Request) {
 	process, err := s.processManager.StartProcess(req.Cmd, req.Cwd, req.Env)
 	if err != nil {
 		slog.Debug("Failed to start process", "cmd", req.Cmd, "error", err)
-		resp := StartProcessResponse{
-			Error: err.Error(),
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(resp)
+		writeJSON(w, http.StatusInternalServerError, StartProcessResponse{Error: err.Error()})
 		return
 	}
 
@@ -266,13 +306,11 @@ func (s *Server) startProcessHandler(w http.ResponseWriter, r *http.Request) {
 		Status: string(process.Status),
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 type ListProcessesResponse struct {
-	Processes []map[string]interface{} `json:"processes"`
+	Processes []map[string]any `json:"processes"`
 }
 
 func (s *Server) listProcessesHandler(w http.ResponseWriter, r *http.Request) {
@@ -285,19 +323,14 @@ func (s *Server) listProcessesHandler(w http.ResponseWriter, r *http.Request) {
 
 	processes := s.processManager.ListProcesses()
 
-	processesData := make([]map[string]interface{}, len(processes))
+	processesData := make([]map[string]any, len(processes))
 	for i, p := range processes {
 		processesData[i] = p.ToSummaryJSON()
 	}
 
 	slog.Debug("Processes listed", "count", len(processes))
 
-	resp := ListProcessesResponse{
-		Processes: processesData,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, ListProcessesResponse{Processes: processesData})
 }
 
 type KillProcessRequest struct {
@@ -332,25 +365,13 @@ func (s *Server) killProcessHandler(w http.ResponseWriter, r *http.Request) {
 	err := s.processManager.KillProcess(req.ID)
 	if err != nil {
 		slog.Debug("Failed to kill process", "id", req.ID, "error", err)
-		resp := KillProcessResponse{
-			Success: false,
-			Error:   err.Error(),
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(resp)
+		writeJSON(w, http.StatusBadRequest, KillProcessResponse{Success: false, Error: err.Error()})
 		return
 	}
 
 	slog.Debug("Process killed successfully via API", "id", req.ID)
 
-	resp := KillProcessResponse{
-		Success: true,
-		Message: "Process killed successfully",
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, KillProcessResponse{Success: true, Message: "Process killed successfully"})
 }
 
 func (s *Server) processLogsStreamingHandler(w http.ResponseWriter, r *http.Request) {
@@ -412,11 +433,8 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Cwd != "" {
-		if info, err := os.Stat(req.Cwd); err != nil || !info.IsDir() {
-			http.Error(w, fmt.Sprintf("Invalid working directory: %s", req.Cwd), http.StatusBadRequest)
-			return
-		}
+	if !checkCwd(w, req.Cwd) {
+		return
 	}
 
 	slog.Debug("Executing streaming command", "cmd", req.Cmd, "cwd", req.Cwd, "env", req.Env)
@@ -442,28 +460,14 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", req.Cmd)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = streamingCommandWaitDelay
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return os.ErrProcessDone
-		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-			return err
-		}
-		return nil
-	}
+	cmd.Cancel = cancelProcessGroup(cmd)
 
 	// Set working directory if provided
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	}
 
-	// Set environment variables if provided
-	if len(req.Env) > 0 {
-		cmd.Env = os.Environ()
-		for key, value := range req.Env {
-			cmd.Env = append(cmd.Env, key+"="+value)
-		}
-	}
+	cmd.Env = commandEnv(req.Env)
 
 	// Hand os/exec io.Writers rather than StdoutPipe/StderrPipe: Wait then drains the
 	// pipes to EOF before returning, so no output is lost, and WaitDelay bounds that
@@ -487,7 +491,7 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 		// WaitDelay after it: kill what is left of the process group. Commands that
 		// start services must redirect their output or use /start_process.
 		slog.Info("Killing background processes still holding the output of a streaming command", "cmd", req.Cmd, "wait_delay", streamingCommandWaitDelay)
-		if killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); killErr != nil && killErr != syscall.ESRCH {
+		if killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
 			slog.Debug("Failed to kill streaming command process group after wait delay", "cmd", req.Cmd, "error", killErr)
 		}
 		// The command itself succeeded: report it like any other exit code 0.
@@ -501,7 +505,7 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Streaming command completed", "cmd", req.Cmd, "exit_code", exitCode)
 
 	// Send completion event
-	completeData, _ := json.Marshal(map[string]interface{}{
+	completeData, _ := json.Marshal(map[string]any{
 		"code":  exitCode,
 		"error": err != nil,
 	})
@@ -588,27 +592,22 @@ func (s *Server) bindPortHandler(w http.ResponseWriter, r *http.Request) {
 	currentPort := s.tcpProxy.GetTargetPort()
 	if currentPort != "" {
 		slog.Debug("Port already bound", "current_port", currentPort, "requested_port", req.Port)
-		resp := map[string]interface{}{
+		writeJSON(w, http.StatusConflict, map[string]any{
 			"success":      false,
 			"error":        "Port already bound",
 			"current_port": currentPort,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(resp)
+		})
 		return
 	}
 
 	s.tcpProxy.SetTargetPort(req.Port)
 	slog.Debug("Port bound successfully", "port", req.Port)
 
-	resp := map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"message": "Port binding configured",
 		"port":    req.Port,
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	})
 }
 
 func (s *Server) unbindPortHandler(w http.ResponseWriter, r *http.Request) {
@@ -618,12 +617,10 @@ func (s *Server) unbindPortHandler(w http.ResponseWriter, r *http.Request) {
 	s.tcpProxy.ClearTargetPort()
 	slog.Debug("Port unbound successfully")
 
-	resp := map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"message": "Port binding removed",
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	})
 }
 
 func (s *Server) deleteDirHandler(w http.ResponseWriter, r *http.Request) {
@@ -636,15 +633,12 @@ func (s *Server) deleteDirHandler(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Deleting directory", "path", req.Path)
 
 	err := os.RemoveAll(req.Path)
-	resp := map[string]interface{}{"success": err == nil}
 	if err != nil {
 		slog.Debug("Failed to delete directory", "path", req.Path, "error", err)
-		resp["error"] = err.Error()
 	} else {
 		slog.Debug("Directory deleted successfully", "path", req.Path)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeResult(w, err)
 }
 
 func (s *Server) makeDirHandler(w http.ResponseWriter, r *http.Request) {
@@ -657,15 +651,12 @@ func (s *Server) makeDirHandler(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Creating directory", "path", req.Path)
 
 	err := os.MkdirAll(req.Path, 0o755)
-	resp := map[string]interface{}{"success": err == nil}
 	if err != nil {
 		slog.Debug("Failed to create directory", "path", req.Path, "error", err)
-		resp["error"] = err.Error()
 	} else {
 		slog.Debug("Directory created successfully", "path", req.Path)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeResult(w, err)
 }
 
 func (s *Server) listDirHandler(w http.ResponseWriter, r *http.Request) {
@@ -689,8 +680,7 @@ func (s *Server) listDirHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		slog.Debug("Directory listed successfully", "path", req.Path, "entries", len(entries))
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) writeFileHandler(w http.ResponseWriter, r *http.Request) {
@@ -704,15 +694,12 @@ func (s *Server) writeFileHandler(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Writing file", "path", req.Path, "content_length", contentLen)
 
 	err := os.WriteFile(req.Path, []byte(req.Content), 0o644)
-	resp := map[string]interface{}{"success": err == nil}
 	if err != nil {
 		slog.Debug("Failed to write file", "path", req.Path, "error", err)
-		resp["error"] = err.Error()
 	} else {
 		slog.Debug("File written successfully", "path", req.Path, "bytes", contentLen)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeResult(w, err)
 }
 
 func (s *Server) readFileHandler(w http.ResponseWriter, r *http.Request) {
@@ -733,8 +720,7 @@ func (s *Server) readFileHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("File read successfully", "path", req.Path, "bytes", len(content))
 		resp.Content = string(content)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) deleteFileHandler(w http.ResponseWriter, r *http.Request) {
@@ -747,13 +733,10 @@ func (s *Server) deleteFileHandler(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Deleting file", "path", req.Path)
 
 	err := os.Remove(req.Path)
-	resp := map[string]interface{}{"success": err == nil}
 	if err != nil {
 		slog.Debug("Failed to delete file", "path", req.Path, "error", err)
-		resp["error"] = err.Error()
 	} else {
 		slog.Debug("File deleted successfully", "path", req.Path)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeResult(w, err)
 }
