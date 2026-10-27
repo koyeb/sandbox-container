@@ -419,8 +419,7 @@ func (s *Server) openUploadHandler(w http.ResponseWriter, r *http.Request) {
 	s.uploads.add(sess)
 
 	slog.Debug("Upload session opened", "path", sess.dest, "bytes", sess.size)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(openUploadResponse{UploadID: sess.id, MaxPartSize: maxUploadPartSize})
+	writeJSON(w, http.StatusOK, openUploadResponse{UploadID: sess.id, MaxPartSize: maxUploadPartSize})
 }
 
 // errPartTooLong means a part streamed past its cap.
@@ -480,6 +479,11 @@ func uploadPartParams(w http.ResponseWriter, r *http.Request, sess *uploadSessio
 	return offset, wantSum, true
 }
 
+// writeUnknownUpload answers a request naming no live session.
+func writeUnknownUpload(w http.ResponseWriter) {
+	writeFileError(w, http.StatusNotFound, "unknown upload session")
+}
+
 // writePartTooLarge answers a part above max_part_size.
 func writePartTooLarge(w http.ResponseWriter) {
 	writeFileError(w, http.StatusRequestEntityTooLarge,
@@ -517,7 +521,7 @@ func writePartError(w http.ResponseWriter, err error, sess *uploadSession, offse
 func (s *Server) putUploadPartHandler(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.uploads.session(r.PathValue("id"))
 	if !ok {
-		writeFileError(w, http.StatusNotFound, "unknown upload session")
+		writeUnknownUpload(w)
 		return
 	}
 	offset, wantSum, ok := uploadPartParams(w, r, sess)
@@ -556,15 +560,14 @@ func (s *Server) putUploadPartHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) uploadStatusHandler(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.uploads.session(r.PathValue("id"))
 	if !ok {
-		writeFileError(w, http.StatusNotFound, "unknown upload session")
+		writeUnknownUpload(w)
 		return
 	}
 	spans := s.uploads.receivedSpans(sess)
 	if spans == nil {
 		spans = []uploadSpan{}
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(uploadStatusResponse{Size: sess.size, Ranges: spans})
+	writeJSON(w, http.StatusOK, uploadStatusResponse{Size: sess.size, Ranges: spans})
 }
 
 // verifyUploadSum hashes the temp file when the session promised a sha256.
@@ -609,13 +612,11 @@ func (s *Server) completeUploadHandler(w http.ResponseWriter, r *http.Request) {
 	st := s.uploads
 	sess, missing, ok := st.claimForCompletion(r.PathValue("id"))
 	if !ok {
-		writeFileError(w, http.StatusNotFound, "unknown upload session")
+		writeUnknownUpload(w)
 		return
 	}
 	if missing != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(uploadErrorResponse{
+		writeJSON(w, http.StatusConflict, uploadErrorResponse{
 			Error:  fmt.Sprintf("%d range(s) of the upload are still missing", len(missing)),
 			Ranges: missing,
 		})
@@ -643,15 +644,14 @@ func (s *Server) completeUploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Debug("Upload completed", "path", sess.dest, "bytes", sess.size)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(completeUploadResponse{Size: sess.size, SHA256: sum})
+	writeJSON(w, http.StatusOK, completeUploadResponse{Size: sess.size, SHA256: sum})
 }
 
 // abortUploadHandler aborts the session and removes its temp file.
 func (s *Server) abortUploadHandler(w http.ResponseWriter, r *http.Request) {
 	sess := s.uploads.abort(r.PathValue("id"))
 	if sess == nil {
-		writeFileError(w, http.StatusNotFound, "unknown upload session")
+		writeUnknownUpload(w)
 		return
 	}
 	slog.Debug("Upload aborted", "path", sess.dest)
