@@ -579,6 +579,14 @@ func TestUploadsValidation(t *testing.T) {
 		t.Errorf("refused parts recorded ranges: %v", ranges)
 	}
 
+	// An empty part answers 204 and records nothing.
+	if w := putUploadPart(mux, id, 0, nil, ""); w.Code != http.StatusNoContent {
+		t.Errorf("empty part: expected 204, got %d: %s", w.Code, w.Body.String())
+	}
+	if ranges := decodeRanges(t, uploadStatus(mux, id)); len(ranges) != 0 {
+		t.Errorf("empty part recorded ranges: %v", ranges)
+	}
+
 	// Unregistered method combinations.
 	if w := serve(mux, newAuthRequest(http.MethodPut, "/files/uploads", []byte("x"))); w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("PUT collection: expected 405, got %d", w.Code)
