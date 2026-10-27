@@ -296,11 +296,22 @@ func TestUploadsPartTooLarge(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "f")
 	id := openUpload(t, mux, map[string]any{"path": path, "size": maxUploadPartSize + 4096})
 
-	// Declared Content-Length above the cap: refused before reading.
+	// Declared Content-Length above the cap: refused before reading,
+	// and nothing of it is recorded.
 	req := newAuthRequest(http.MethodPut, "/files/uploads/"+id+"?offset=0", []byte("x"))
 	req.ContentLength = maxUploadPartSize + 1
 	if w := serve(mux, req); w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("expected 413, got %d: %s", w.Code, w.Body.String())
+	}
+	if ranges := decodeRanges(t, uploadStatus(mux, id)); len(ranges) != 0 {
+		t.Fatalf("refused part recorded ranges: %v", ranges)
+	}
+
+	// A part of exactly max_part_size is as large as it may be.
+	req = newAuthRequest(http.MethodPut, "/files/uploads/"+id+"?offset=0", []byte("x"))
+	req.ContentLength = maxUploadPartSize
+	if w := serve(mux, req); w.Code != http.StatusNoContent {
+		t.Fatalf("declared max_part_size: expected 204, got %d: %s", w.Code, w.Body.String())
 	}
 
 	// No Content-Length: the stream itself is capped at max_part_size.
@@ -309,6 +320,18 @@ func TestUploadsPartTooLarge(t *testing.T) {
 	req.ContentLength = -1
 	if w := serve(mux, req); w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("expected 413, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// A stream that lands on the last byte the upload can hold stops
+	// exactly there: past the end is a 400, not the part cap's 413.
+	req = newAuthRequest(http.MethodPut, "/files/uploads/"+id+"?offset=4096", nil)
+	req.Body = io.NopCloser(io.LimitReader(endlessReader{'a'}, maxUploadPartSize+1))
+	req.ContentLength = -1
+	if w := serve(mux, req); w.Code != http.StatusBadRequest {
+		t.Fatalf("streamed to the last byte: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if ranges := decodeRanges(t, uploadStatus(mux, id)); len(ranges) != 1 || ranges[0] != (uploadSpan{Start: 0, End: 1}) {
+		t.Fatalf("ranges = %v, want only the accepted part", ranges)
 	}
 
 	// A part that would write past the upload size is refused even when small,
@@ -519,6 +542,9 @@ func TestUploadsValidation(t *testing.T) {
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("%s: expected 400, got %d: %s", name, w.Code, w.Body.String())
 		}
+	}
+	if ranges := decodeRanges(t, uploadStatus(mux, id)); len(ranges) != 0 {
+		t.Errorf("refused parts recorded ranges: %v", ranges)
 	}
 
 	// Unregistered method combinations.
