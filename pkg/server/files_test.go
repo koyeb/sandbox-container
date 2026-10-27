@@ -778,3 +778,31 @@ func TestFilesPutForbidden(t *testing.T) {
 	}
 	expectError(t, putFile(t, mux, filepath.Join(dir, "f"), []byte("x")), http.StatusForbidden)
 }
+
+// A crashed PUT leaves its temp next to the destination; the next run sweeps
+// it from the working directory down — and only it.
+func TestSweepOrphanedTemps(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "sub"), 0o755)
+	orphan := filepath.Join(dir, "sub", ".data.bin.koyeb-tmp-123456")
+	os.WriteFile(orphan, []byte("x"), 0o644)
+	linked := filepath.Join(dir, ".through-a-link.koyeb-tmp-1")
+	if err := os.Symlink(filepath.Join(dir, "sub"), linked); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(dir, "data.bin")
+	os.WriteFile(keep, []byte("x"), 0o644)
+
+	if err := SweepOrphanedTemps(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Error("the orphaned temp file survived the sweep")
+	}
+	if _, err := os.Lstat(linked); err != nil {
+		t.Errorf("the sweep followed or removed a symlink: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Error("the sweep removed a real file")
+	}
+}

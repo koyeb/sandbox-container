@@ -300,6 +300,8 @@ curl -H "Authorization: Bearer your-secret" \
 **Description:** Writes the request body to the file, creating or replacing it atomically: the body goes to a
 temp file next to the destination (`.<name>.koyeb-tmp-<random>`), which is synced to disk and then renamed over
 the destination. A request that fails or ends early leaves the destination as it was and removes the temp file.
+A crash may still orphan the temp file; the executor sweeps `.<name>.koyeb-tmp-*` files under its working
+directory at startup.
 
 **Parameters:**
 - `path` (required): the file to write. If it is a symlink, its target is written (and created if it doesn't

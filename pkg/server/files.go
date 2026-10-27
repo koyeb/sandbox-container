@@ -393,6 +393,31 @@ func commitTempFile(tmp *os.File, path string, mode fs.FileMode) error {
 	return nil
 }
 
+// SweepOrphanedTemps removes the PUT temp files a previous run crashed
+// without cleaning up: they sit next to their destination as
+// .<name>.koyeb-tmp-* and would linger as regular entries in listings. The
+// walk does not follow symlinks, and a file it cannot remove is logged and
+// skipped, so a locked orphan never blocks the startup.
+func SweepOrphanedTemps(root string) error {
+	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			slog.Debug("Temp sweep skipped a directory", "path", p, "error", err)
+			return nil
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasPrefix(name, ".") || !strings.Contains(name, ".koyeb-tmp-") {
+			return nil
+		}
+		if err := os.Remove(p); err != nil {
+			slog.Debug("Temp sweep failed to remove an orphan", "path", p, "error", err)
+		}
+		return nil
+	})
+}
+
 func (s *Server) statFileHandler(w http.ResponseWriter, r *http.Request) {
 	path, ok := pathParam(w, r)
 	if !ok {
