@@ -23,14 +23,6 @@ import (
 // {"error": "..."} body. The JSON routes (/write_file, /read_file, ...) are kept
 // as they are for older clients.
 
-func (s *Server) registerFileRoutes(mux *http.ServeMux) {
-	// A GET pattern also matches HEAD.
-	mux.Handle("GET /files", s.authMiddleware(http.HandlerFunc(s.getFileHandler)))
-	mux.Handle("PUT /files", s.authMiddleware(http.HandlerFunc(s.putFileHandler)))
-	mux.Handle("GET /files/stat", s.authMiddleware(http.HandlerFunc(s.statFileHandler)))
-	mux.Handle("GET /files/list", s.authMiddleware(http.HandlerFunc(s.listFilesHandler)))
-}
-
 type PutFileResponse struct {
 	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
@@ -48,6 +40,14 @@ type FileEntry struct {
 	Error string `json:"error,omitempty"`
 }
 
+func (s *Server) registerFileRoutes(mux *http.ServeMux) {
+	// A GET pattern also matches HEAD.
+	mux.Handle("GET /files", s.authMiddleware(http.HandlerFunc(s.getFileHandler)))
+	mux.Handle("PUT /files", s.authMiddleware(http.HandlerFunc(s.putFileHandler)))
+	mux.Handle("GET /files/stat", s.authMiddleware(http.HandlerFunc(s.statFileHandler)))
+	mux.Handle("GET /files/list", s.authMiddleware(http.HandlerFunc(s.listFilesHandler)))
+}
+
 func writeFileError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -61,7 +61,10 @@ func fsErrorStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, fs.ErrPermission):
 		return http.StatusForbidden
-	case errors.Is(err, fs.ErrExist), errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.EISDIR), errors.Is(err, syscall.ENOTEMPTY):
+	case errors.Is(err, fs.ErrExist),
+		errors.Is(err, syscall.ENOTDIR),
+		errors.Is(err, syscall.EISDIR),
+		errors.Is(err, syscall.ENOTEMPTY):
 		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
@@ -153,7 +156,7 @@ func (s *Server) putFileHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	query := r.URL.Query()
 
-	var mode fs.FileMode = 0o644
+	mode := fs.FileMode(0o644)
 	modeSet := query.Get("mode") != ""
 	if modeSet {
 		m, err := strconv.ParseUint(query.Get("mode"), 8, 32)
@@ -285,7 +288,7 @@ func commitTempFile(tmp *os.File, path string, mode fs.FileMode) error {
 		if err := d.Sync(); err != nil {
 			slog.Debug("Failed to sync directory", "path", path, "error", err)
 		}
-		d.Close()
+		_ = d.Close()
 	}
 	return nil
 }

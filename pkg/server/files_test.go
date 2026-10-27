@@ -301,7 +301,8 @@ func TestFilesStat(t *testing.T) {
 	var entry FileEntry
 	json.NewDecoder(w.Body).Decode(&entry)
 	sum := sha256.Sum256([]byte("hello"))
-	if entry.Type != "file" || entry.Size != 5 || entry.Mode != "0640" || entry.MTime == "" || entry.SHA256 != hex.EncodeToString(sum[:]) {
+	if entry.Type != "file" || entry.Size != 5 || entry.Mode != "0640" ||
+		entry.MTime == "" || entry.SHA256 != hex.EncodeToString(sum[:]) {
 		t.Errorf("unexpected stat: %+v", entry)
 	}
 
@@ -372,7 +373,7 @@ func TestFilesErrors(t *testing.T) {
 		return serve(mux, newAuthRequest(http.MethodGet, filesURL(route, path, params...), nil))
 	}
 
-	cases := []struct {
+	tests := []struct {
 		name   string
 		w      *httptest.ResponseRecorder
 		status int
@@ -384,7 +385,9 @@ func TestFilesErrors(t *testing.T) {
 
 		{"PUT onto a directory", putFile(t, mux, dir, []byte("x")), http.StatusConflict},
 		{"PUT under a file", putFile(t, mux, filepath.Join(file, "f"), []byte("x")), http.StatusConflict},
-		{"PUT parents under a file", putFile(t, mux, filepath.Join(file, "a", "f"), []byte("x"), "parents", "1"), http.StatusConflict},
+		{"PUT parents under a file",
+			putFile(t, mux, filepath.Join(file, "a", "f"), []byte("x"), "parents", "1"),
+			http.StatusConflict},
 
 		{"GET no path", serve(mux, newAuthRequest(http.MethodGet, "/files", nil)), http.StatusBadRequest},
 		{"GET a directory", get("/files", dir), http.StatusBadRequest},
@@ -393,8 +396,8 @@ func TestFilesErrors(t *testing.T) {
 		{"PUT bad mode", putFile(t, mux, file, []byte("x"), "mode", "rwx"), http.StatusBadRequest},
 		{"PUT mode out of range", putFile(t, mux, file, []byte("x"), "mode", "4755"), http.StatusBadRequest},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) { expectError(t, c.w, c.status) })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) { expectError(t, tt.w, tt.status) })
 	}
 
 	req := newAuthRequest(http.MethodPut, filesURL("/files", file), []byte("x"))
@@ -406,7 +409,8 @@ func TestFilesErrors(t *testing.T) {
 	if w := serve(mux, req); w.Code != http.StatusUnauthorized {
 		t.Errorf("unauthenticated GET: %d", w.Code)
 	}
-	if w := serve(mux, newAuthRequest(http.MethodPost, filesURL("/files", file), nil)); w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("POST /files: %d", w.Code)
+	post := serve(mux, newAuthRequest(http.MethodPost, filesURL("/files", file), nil))
+	if post.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST /files: %d", post.Code)
 	}
 }
