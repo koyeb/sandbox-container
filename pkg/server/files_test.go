@@ -145,6 +145,21 @@ func TestFilesPutChecksumAndMode(t *testing.T) {
 	if len(listTempFiles(t, filepath.Dir(path))) != 0 {
 		t.Error("temp file left behind")
 	}
+
+	// 0777 is the upper bound of the mode parse, and an explicit mode
+	// replaces an existing file's mode rather than inheriting it.
+	if w := putFile(t, mux, path, []byte("x"), "mode", "0777"); w.Code != http.StatusOK {
+		t.Fatalf("mode 0777: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0o777 {
+		t.Errorf("mode 0777: got %o", info.Mode().Perm())
+	}
+	if w := putFile(t, mux, path, []byte("y"), "mode", "0600"); w.Code != http.StatusOK {
+		t.Fatalf("mode onto existing: expected 200, got %d", w.Code)
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
+		t.Errorf("mode onto existing: got %o", info.Mode().Perm())
+	}
 }
 
 // A dangling link is written through too: its target is created, as os.WriteFile does.
@@ -229,6 +244,23 @@ func TestFilesPutInterrupted(t *testing.T) {
 	}
 }
 
+// A rename onto a directory fails: commitTempFile must report it, not let the
+// caller believe the file landed.
+func TestCommitTempFileRenameFailure(t *testing.T) {
+	dir := t.TempDir()
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+	if err := os.Mkdir(filepath.Join(dir, "target"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitTempFile(tmp, filepath.Join(dir, "target"), 0o644); err == nil {
+		t.Error("expected the rename onto a directory to fail")
+	}
+}
+
 func TestFilesRange(t *testing.T) {
 	_, mux := newTestServer(t)
 	path := filepath.Join(t.TempDir(), "f")
@@ -288,6 +320,17 @@ func TestFilesGetEmptyFile(t *testing.T) {
 	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", path), nil))
 	if w.Code != http.StatusOK || w.Body.Len() != 0 {
 		t.Fatalf("expected an empty 200, got %d %q", w.Code, w.Body.String())
+	}
+
+	// Only a size of 0 takes the raw-stream path; a one-byte file goes
+	// through ServeContent like any other.
+	one := filepath.Join(filepath.Dir(path), "one")
+	os.WriteFile(one, []byte("x"), 0o644)
+	w = serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", one), nil))
+	if w.Code != http.StatusOK || w.Body.String() != "x" ||
+		w.Header().Get("ETag") == "" || w.Header().Get("Content-Length") != "1" {
+		t.Fatalf("one-byte file: %d %q etag=%q length=%q", w.Code, w.Body.String(),
+			w.Header().Get("ETag"), w.Header().Get("Content-Length"))
 	}
 }
 
@@ -486,6 +529,17 @@ func TestFilesErrors(t *testing.T) {
 	req := newAuthRequest(http.MethodPut, filesURL("/files", file), []byte("x"))
 	req.Header.Set("X-Content-SHA256", "not-hex")
 	expectError(t, serve(mux, req), http.StatusBadRequest)
+
+	// A valid hex string of the wrong length is rejected at the boundary,
+	// before any bytes are written.
+	req = newAuthRequest(http.MethodPut, filesURL("/files", file), []byte("x"))
+	req.Header.Set("X-Content-SHA256", strings.Repeat("a", 62))
+	w := serve(mux, req)
+	body := w.Body.String()
+	expectError(t, w, http.StatusBadRequest)
+	if !strings.Contains(body, "64 hex") {
+		t.Errorf("short checksum: %q", body)
+	}
 
 	// Without a token the routes are closed like the others.
 	req = httptest.NewRequest(http.MethodGet, filesURL("/files", file), nil)
