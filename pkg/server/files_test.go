@@ -759,3 +759,20 @@ func TestFilesGetThroughSymlink(t *testing.T) {
 		t.Errorf("stat through a symlink: %d %+v", w.Code, entry)
 	}
 }
+
+// A PUT into a directory the executor cannot write answers 403 as well.
+func TestFilesPutForbidden(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses permission bits; no 403 to observe")
+	}
+	_, mux := newTestServer(t)
+	dir := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	expectError(t, putFile(t, mux, filepath.Join(dir, "f"), []byte("x")), http.StatusForbidden)
+}
