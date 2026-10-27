@@ -305,8 +305,10 @@ func (s *Server) putFileHandler(w http.ResponseWriter, r *http.Request) {
 // writeTarget follows symlinks at path, as /write_file does, rather than
 // replacing the link, including a link whose target doesn't exist yet.
 func writeTarget(path string) (string, error) {
-	// 40 hops, the kernel's own limit: past it open fails ELOOP, so refuse
-	// rather than let the rename replace the final link.
+	// 40 hops, the kernel's own limit. A path still a link after them is a
+	// loop or over-deep: the kernel would fail it, so refuse rather than
+	// let the rename replace the final link.
+	orig := path
 	for range 40 {
 		info, err := os.Lstat(path)
 		if err != nil || info.Mode()&fs.ModeSymlink == 0 {
@@ -321,7 +323,11 @@ func writeTarget(path string) (string, error) {
 		}
 		path = target
 	}
-	return "", &fs.PathError{Op: "resolve", Path: path, Err: syscall.ELOOP}
+	// Exactly 40 hops may land on a real file, which the kernel allows.
+	if info, err := os.Lstat(path); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		return "", &fs.PathError{Op: "resolve", Path: orig, Err: syscall.ELOOP}
+	}
+	return path, nil
 }
 
 // commitTempFile makes tmp durable with mode and renames it to path.

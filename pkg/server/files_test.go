@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -220,6 +221,43 @@ func TestFilesPutSymlinkLoop(t *testing.T) {
 	}
 	if got, _ := os.Readlink(loop); got != loop {
 		t.Errorf("link target changed: %q", got)
+	}
+	if tmp := listTempFiles(t, dir); len(tmp) != 0 {
+		t.Errorf("temp files left behind: %v", tmp)
+	}
+}
+
+// The kernel resolves at most 40 links per path: a chain of exactly 40 must
+// write, and the 41st link is where it refuses with ELOOP.
+func TestFilesPutSymlinkChainLimits(t *testing.T) {
+	_, mux := newTestServer(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	os.WriteFile(target, []byte("old"), 0o600)
+
+	// l40 → l39 → … → l0 → target.
+	p := target
+	for i := range 41 {
+		link := filepath.Join(dir, fmt.Sprintf("l%d", i))
+		if err := os.Symlink(p, link); err != nil {
+			t.Fatal(err)
+		}
+		p = link
+	}
+
+	if w := putFile(t, mux, filepath.Join(dir, "l39"), []byte("new")); w.Code != http.StatusOK {
+		t.Fatalf("40 links: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got, _ := os.ReadFile(target); string(got) != "new" {
+		t.Errorf("target holds %q", got)
+	}
+
+	entry := filepath.Join(dir, "l40")
+	w := putFile(t, mux, entry, []byte("x"))
+	body := w.Body.String()
+	expectError(t, w, http.StatusInternalServerError)
+	if !strings.Contains(body, entry) {
+		t.Errorf("error names the wrong path: %s", body)
 	}
 	if tmp := listTempFiles(t, dir); len(tmp) != 0 {
 		t.Errorf("temp files left behind: %v", tmp)
