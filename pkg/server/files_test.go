@@ -713,3 +713,19 @@ func TestFilesGetNotModified(t *testing.T) {
 		t.Fatalf("If-None-Match stale: %d %q", w.Code, w.Body.String())
 	}
 }
+
+// A PUT without mode= creates the file with the documented default, 0644.
+func TestFilesPutDefaultMode(t *testing.T) {
+	_, mux := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "f")
+	if w := putFile(t, mux, path, []byte("x")); w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Errorf("default mode %o, expected 0644", fi.Mode().Perm())
+	}
+}
