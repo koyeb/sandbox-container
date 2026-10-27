@@ -12,6 +12,8 @@ A secure sandbox container environment for executing commands and managing files
 - **Streaming Output**: Stream command output in real-time using Server-Sent Events
 - **Background Process Management**: Start, monitor, and control long-running background processes with real-time log streaming
 - **File Operations**: 
+  - Stream raw bytes to and from files (`/files`): binary-safe, any size, Range requests, atomic writes
+  - Stat files and list directory trees
   - Write files
   - Read files
   - Delete files and directories
@@ -133,6 +135,33 @@ data: {"code":0,"error":false}
 ```
 
 Use this endpoint for long-running commands where you want real-time output. For simple commands where buffered output is acceptable, use `/run` instead.
+
+### Files (raw bytes)
+
+Streamed, binary-safe file transfer: the body is the file's bytes, never JSON, so the executor's memory does not
+grow with the file size. The path is a query parameter. Errors use HTTP status codes (400, 403, 404, 409, 500)
+with a JSON body `{"error": "..."}`.
+
+```
+GET  /files?path=/tmp/data.bin                              # download (HEAD: headers only)
+PUT  /files?path=/tmp/out/data.bin&parents=1&mode=0644      # upload, body = the bytes
+GET  /files/stat?path=/tmp/data.bin[&hash=sha256]
+GET  /files/list?path=/tmp[&recursive=1]                    # NDJSON, one entry per line
+Authorization: Bearer <SANDBOX_SECRET>
+```
+
+- `GET` supports `Range`, `If-Range`, `ETag` and `Last-Modified`, so an interrupted download can resume.
+- `PUT` writes to a temp file next to the destination, then renames it: a failed upload leaves the destination
+  as it was. An optional `X-Content-SHA256` header is checked before the rename. It returns
+  `{"size": ..., "sha256": "..."}`.
+
+```bash
+curl -T data.bin -H "Authorization: Bearer $SANDBOX_SECRET" "http://localhost:3030/files?path=/tmp/data.bin"
+curl -H "Authorization: Bearer $SANDBOX_SECRET" -o data.bin "http://localhost:3030/files?path=/tmp/data.bin"
+```
+
+See [docs/sandbox_executor.md](docs/sandbox_executor.md#files-raw-bytes) for every parameter and status code. The
+JSON routes below are kept for older clients.
 
 ### Write File
 ```
