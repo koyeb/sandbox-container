@@ -428,8 +428,12 @@ var errPartTooLong = errors.New("part is longer than allowed")
 
 // partWriter writes at a fixed offset of the session's temp file, capped at
 // limit bytes: a longer part is refused rather than written past the part
-// cap or past the end of the upload.
+// cap or past the end of the upload. Every chunk that lands refreshes the
+// session's TTL, so a part streaming for longer than the TTL never has its
+// session expired mid-copy.
 type partWriter struct {
+	st    *uploadStore
+	sess  *uploadSession
 	file  *os.File
 	off   int64
 	limit int64
@@ -442,6 +446,9 @@ func (pw *partWriter) Write(p []byte) (int, error) {
 	n, err := pw.file.WriteAt(p, pw.off)
 	pw.off += int64(n)
 	pw.limit -= int64(n)
+	if n > 0 {
+		pw.st.touch(pw.sess)
+	}
 	return n, err
 }
 
@@ -518,12 +525,13 @@ func (s *Server) putUploadPartHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The part refreshes the TTL from its first byte, not its last: a slow
-	// client cannot have its session expired mid-copy.
+	// The part refreshes the TTL from its first byte, and every chunk that
+	// lands keeps it fresh: a slow client cannot have its session expired
+	// mid-copy, however long the copy runs.
 	s.uploads.touch(sess)
 
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(h, &partWriter{file: sess.file, off: offset, limit: min(maxUploadPartSize, sess.size-offset)}), r.Body)
+	n, err := io.Copy(io.MultiWriter(h, &partWriter{st: s.uploads, sess: sess, file: sess.file, off: offset, limit: min(maxUploadPartSize, sess.size-offset)}), r.Body)
 	if err != nil {
 		slog.Debug("Failed to receive part", "path", sess.dest, "offset", offset, "error", err)
 		writePartError(w, err, sess, offset)

@@ -577,6 +577,34 @@ func TestUploadsExpiry(t *testing.T) {
 	}
 }
 
+// A part streaming for longer than the TTL keeps its session alive: every
+// chunk that lands counts as activity, so a slow client is never expired
+// mid-copy.
+func TestUploadsSlowPartKeepsSessionAlive(t *testing.T) {
+	srv, mux := newTestServer(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f")
+
+	id := openUpload(t, mux, map[string]any{"path": path, "size": 4096})
+	srv.uploads.mu.Lock()
+	sess := srv.uploads.sessions[id]
+	// The one slow part of this session has been streaming for over a TTL.
+	sess.lastPart = time.Now().Add(-uploadSessionTTL - time.Minute)
+	since := time.Now()
+	srv.uploads.mu.Unlock()
+
+	pw := partWriter{st: srv.uploads, sess: sess, file: sess.file, off: 0, limit: 4096}
+	if _, err := pw.Write([]byte("chunk")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The janitor runs a moment later and must find the session live.
+	srv.uploads.expireSessions(since.Add(time.Second))
+	if w := uploadStatus(mux, id); w.Code != http.StatusOK {
+		t.Fatalf("mid-copy session expired: %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // A session that cannot be recorded for the startup sweep must not open:
 // its temp file would outlive the run with no marker to find it.
 func TestUploadsOpenWithoutMarkerFails(t *testing.T) {
