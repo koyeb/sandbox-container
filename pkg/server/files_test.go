@@ -51,6 +51,14 @@ func expectError(t *testing.T, w *httptest.ResponseRecorder, status int) {
 	}
 }
 
+// assertSymlink fails when path is no longer a symlink.
+func assertSymlink(t *testing.T, path string) {
+	t.Helper()
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("expected %s to remain a symlink: %v", path, err)
+	}
+}
+
 // listTempFiles returns the leftover temp files of PUT /files in dir.
 func listTempFiles(t *testing.T, dir string) []string {
 	t.Helper()
@@ -176,9 +184,7 @@ func TestFilesPutDanglingSymlink(t *testing.T) {
 	if w := putFile(t, mux, link, []byte("new")); w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if fi, _ := os.Lstat(link); fi.Mode()&os.ModeSymlink == 0 {
-		t.Error("the symlink was replaced")
-	}
+	assertSymlink(t, link)
 	if got, _ := os.ReadFile(filepath.Join(dir, "sub", "target")); string(got) != "new" {
 		t.Errorf("target holds %q", got)
 	}
@@ -197,9 +203,7 @@ func TestFilesPutThroughSymlink(t *testing.T) {
 	if w := putFile(t, mux, link, []byte("new")); w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if fi, _ := os.Lstat(link); fi.Mode()&os.ModeSymlink == 0 {
-		t.Error("the symlink was replaced")
-	}
+	assertSymlink(t, link)
 	if got, _ := os.ReadFile(target); string(got) != "new" {
 		t.Errorf("target holds %q", got)
 	}
@@ -216,9 +220,7 @@ func TestFilesPutSymlinkLoop(t *testing.T) {
 	}
 
 	expectError(t, putFile(t, mux, loop, []byte("new")), http.StatusInternalServerError)
-	if fi, _ := os.Lstat(loop); fi.Mode()&os.ModeSymlink == 0 {
-		t.Error("the symlink was replaced")
-	}
+	assertSymlink(t, loop)
 	if got, _ := os.Readlink(loop); got != loop {
 		t.Errorf("link target changed: %q", got)
 	}
