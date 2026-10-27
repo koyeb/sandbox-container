@@ -203,7 +203,11 @@ func parsePutReq(w http.ResponseWriter, r *http.Request) (putReq, bool) {
 // resolvePutDest follows symlinks to the write target, refuses a directory in
 // the way, and keeps the replaced file's mode when the request didn't set one.
 func resolvePutDest(w http.ResponseWriter, req putReq) (putDest, bool) {
-	path := writeTarget(req.path)
+	path, err := writeTarget(req.path)
+	if err != nil {
+		writeFSError(w, err)
+		return putDest{}, false
+	}
 	dest := putDest{path: path, mode: req.mode}
 	if info, err := os.Stat(path); err == nil {
 		if info.IsDir() {
@@ -299,23 +303,24 @@ func (s *Server) putFileHandler(w http.ResponseWriter, r *http.Request) {
 
 // writeTarget follows symlinks at path, as /write_file does, rather than
 // replacing the link, including a link whose target doesn't exist yet.
-func writeTarget(path string) string {
-	// 40 hops, the kernel's limit: past it, the loop is left to fail as ELOOP.
+func writeTarget(path string) (string, error) {
+	// 40 hops, the kernel's own limit: past it open fails ELOOP, so refuse
+	// rather than let the rename replace the final link.
 	for range 40 {
 		info, err := os.Lstat(path)
 		if err != nil || info.Mode()&fs.ModeSymlink == 0 {
-			return path
+			return path, nil
 		}
 		target, err := os.Readlink(path)
 		if err != nil {
-			return path
+			return path, nil
 		}
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(path), target)
 		}
 		path = target
 	}
-	return path
+	return "", &fs.PathError{Op: "resolve", Path: path, Err: syscall.ELOOP}
 }
 
 // commitTempFile makes tmp durable with mode and renames it to path.

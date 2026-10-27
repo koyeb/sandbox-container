@@ -204,6 +204,28 @@ func TestFilesPutThroughSymlink(t *testing.T) {
 	}
 }
 
+// A symlink loop never resolves: like /write_file, the PUT must fail rather
+// than rename the upload over the final link.
+func TestFilesPutSymlinkLoop(t *testing.T) {
+	_, mux := newTestServer(t)
+	dir := t.TempDir()
+	loop := filepath.Join(dir, "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+
+	expectError(t, putFile(t, mux, loop, []byte("new")), http.StatusInternalServerError)
+	if fi, _ := os.Lstat(loop); fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the symlink was replaced")
+	}
+	if got, _ := os.Readlink(loop); got != loop {
+		t.Errorf("link target changed: %q", got)
+	}
+	if tmp := listTempFiles(t, dir); len(tmp) != 0 {
+		t.Errorf("temp files left behind: %v", tmp)
+	}
+}
+
 // failingReader returns data, then err, like a client that goes away mid-upload.
 type failingReader struct {
 	data []byte
