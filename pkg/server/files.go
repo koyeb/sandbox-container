@@ -23,6 +23,7 @@ import (
 // {"error": "..."} body. The JSON routes (/write_file, /read_file, ...) are kept
 // as they are for older clients.
 
+// PutFileResponse reports the size and sha256 of a completed upload.
 type PutFileResponse struct {
 	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
