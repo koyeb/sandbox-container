@@ -368,7 +368,8 @@ curl -H "Authorization: Bearer your-secret" \
 written as the directory is read, so a large tree is never built in memory. Without `recursive=1`, only the
 directory's direct entries are listed.
 
-**Response:** one line per entry, in lexical order, the directory itself excluded:
+**Response:** one line per entry, the directory itself excluded, in lexical order within each
+directory (a recursive walk is depth-first):
 ```
 {"path":"src","type":"dir","size":4096,"mode":"0755","mtime":"2026-10-08T15:04:05.123456789Z"}
 {"path":"src/main.go","type":"file","size":1234,"mode":"0644","mtime":"2026-10-08T15:04:05.123456789Z"}
