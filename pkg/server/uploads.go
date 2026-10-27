@@ -407,9 +407,14 @@ func (s *Server) openUploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The marker outlives this process just long enough for the next run's
-	// startup sweep to find the temp file.
+	// startup sweep to find the temp file. A session that cannot be
+	// recorded for that sweep is refused: it would leave an orphan no
+	// future run can find.
 	if err := os.WriteFile(s.uploads.markerPath(sess.id), []byte(sess.tempPath), 0o600); err != nil {
 		slog.Debug("Failed to write upload marker", "path", sess.tempPath, "error", err)
+		s.uploads.discard(sess)
+		writeFileError(w, http.StatusInternalServerError, "failed to record the upload session")
+		return
 	}
 	s.uploads.add(sess)
 

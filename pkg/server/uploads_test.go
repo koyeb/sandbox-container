@@ -577,6 +577,28 @@ func TestUploadsExpiry(t *testing.T) {
 	}
 }
 
+// A session that cannot be recorded for the startup sweep must not open:
+// its temp file would outlive the run with no marker to find it.
+func TestUploadsOpenWithoutMarkerFails(t *testing.T) {
+	markers := filepath.Join(os.TempDir(), "koyeb-file-uploads")
+	os.RemoveAll(markers)
+	if err := os.WriteFile(markers, []byte("not a dir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(markers)
+
+	_, mux := newTestServer(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f")
+
+	if w := postUpload(mux, map[string]any{"path": path, "size": 4096}); w.Code != http.StatusInternalServerError {
+		t.Fatalf("marker-less open: expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+	if tmp := listTempFiles(t, dir); len(tmp) != 0 {
+		t.Errorf("marker-less open left temp files: %v", tmp)
+	}
+}
+
 // Temp files left by a previous executor run are swept at startup through the
 // marker registry; sessions do not survive a restart.
 func TestUploadsRestartSweepsOrphanedTempFiles(t *testing.T) {
