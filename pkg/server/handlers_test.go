@@ -599,3 +599,131 @@ func TestCancelProcessGroupKillsGroupAndToleratesEsrch(t *testing.T) {
 		t.Errorf("cancel after reap: %v", err)
 	}
 }
+
+// A start with a valid working directory runs, and the API kill of the
+// started process reports success.
+func TestStartProcessValidCwd(t *testing.T) {
+	_, mux := newTestServer(t)
+
+	reqBody, _ := json.Marshal(map[string]string{"cmd": "sleep 30", "cwd": t.TempDir()})
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/start_process", reqBody))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("start: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var started StartProcessResponse
+	if err := json.NewDecoder(w.Body).Decode(&started); err != nil {
+		t.Fatalf("start body: %v", err)
+	}
+	if started.ID == "" || started.Status != "running" {
+		t.Errorf("start body: %+v", started)
+	}
+
+	killBody, _ := json.Marshal(KillProcessRequest{ID: started.ID})
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/kill_process", killBody))
+	if w.Code != http.StatusOK {
+		t.Fatalf("kill: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var killed KillProcessResponse
+	if err := json.NewDecoder(w.Body).Decode(&killed); err != nil {
+		t.Fatalf("kill body: %v", err)
+	}
+	if !killed.Success || killed.Message == "" {
+		t.Errorf("kill body: %+v", killed)
+	}
+}
+
+// Killing an unknown process id reports failure with the error.
+func TestKillProcessUnknown(t *testing.T) {
+	_, mux := newTestServer(t)
+
+	reqBody, _ := json.Marshal(KillProcessRequest{ID: "no-such-process"})
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/kill_process", reqBody))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp KillProcessResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Success || resp.Error == "" {
+		t.Errorf("expected success=false with an error, got %+v", resp)
+	}
+}
+
+// /list_dir names a directory's entries, and reports an unreadable one in
+// the error field.
+func TestListDirEnvelope(t *testing.T) {
+	_, mux := newTestServer(t)
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "one"), []byte("x"), 0o644)
+
+	body, _ := json.Marshal(ListDirRequest{Path: dir})
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/list_dir", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list_dir: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp ListDirResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("list_dir body: %v", err)
+	}
+	if len(resp.Entries) != 1 || resp.Entries[0] != "one" || resp.Error != "" {
+		t.Errorf("list_dir body: %+v", resp)
+	}
+
+	body, _ = json.Marshal(ListDirRequest{Path: filepath.Join(dir, "missing")})
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/list_dir", body))
+	var errResp ListDirResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("list_dir-error body: %v", err)
+	}
+	if w.Code != http.StatusOK || errResp.Error == "" || errResp.Entries != nil {
+		t.Errorf("list_dir-error: %d %+v", w.Code, errResp)
+	}
+}
+
+// /bind_port binds once and refuses a second binding with 409;
+// /unbind_port releases it.
+func TestBindPortEnvelope(t *testing.T) {
+	_, mux := newTestServer(t)
+
+	body, _ := json.Marshal(BindPortRequest{Port: "18123"})
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/bind_port", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("bind_port: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp["success"] != true || resp["port"] != "18123" {
+		t.Errorf("bind_port body: %v (%q)", resp, w.Body.String())
+	}
+
+	body, _ = json.Marshal(BindPortRequest{Port: "18124"})
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/bind_port", body))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("rebind: expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp["success"] != false || resp["current_port"] != "18123" {
+		t.Errorf("rebind body: %v (%q)", resp, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/unbind_port", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("unbind_port: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp["success"] != true {
+		t.Errorf("unbind_port body: %v (%q)", resp, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, newAuthRequest(http.MethodPost, "/bind_port", []byte("{}")))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bind_port empty: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
