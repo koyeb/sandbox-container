@@ -10,10 +10,19 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # The Azure federated credential trusts repo:koyeb/sandbox-container:environment:production,
+    # one subject for both main and tag builds.
+    environment: production
+    permissions:
+      contents: write
+      id-token: write
     env:
       IMAGE_NAME: ${{ secrets.DOCKERHUB_REPOSITORY || format('{0}/sandbox', secrets.DOCKER_USERNAME) }}
       KOYEB_REGISTRY: registry.prod.koyeb.com
       KOYEB_IMAGE: ${{ startsWith(secrets.KOYEB_REGISTRY_REPOSITORY, 'registry.prod.koyeb.com/') && secrets.KOYEB_REGISTRY_REPOSITORY || format('{0}/{1}', 'registry.prod.koyeb.com', secrets.KOYEB_REGISTRY_REPOSITORY || 'koyeb/sandbox') }}
+      # MAIS CDN: cdn-images.mistralai.com is a CNAME of mistralaishared.azurecr.io, and docker/3rdparty/<image>
+      # is the path the MAIS mirror uses for docker.io/<image>.
+      MAIS_CDN_REPOSITORY: mistralaishared.azurecr.io/docker/3rdparty
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,6 +51,16 @@ jobs:
           username: ${{ secrets.KOYEB_REGISTRY_USERNAME }}
           password: ${{ secrets.KOYEB_REGISTRY_PASSWORD }}
 
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to MAIS CDN registry
+        run: az acr login --name mistralaishared
+
       # A BuildKit builder of its own: the default docker driver ignores the zstd compression below and pushes gzip.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -62,6 +81,8 @@ jobs:
             ${{ env.IMAGE_NAME }}:latest
             ${{ env.KOYEB_IMAGE }}:${{ github.ref_name }}
             ${{ env.KOYEB_IMAGE }}:latest
+            ${{ env.MAIS_CDN_REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ${{ env.MAIS_CDN_REPOSITORY }}/${{ env.IMAGE_NAME }}:latest
 
       - name: Build and push full sandbox (main)
         if: startsWith(github.ref, 'refs/heads/main')
@@ -79,6 +100,8 @@ jobs:
             ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
             ${{ env.KOYEB_IMAGE }}:main
             ${{ env.KOYEB_IMAGE }}:sha-${{ github.sha }}
+            ${{ env.MAIS_CDN_REPOSITORY }}/${{ env.IMAGE_NAME }}:main
+            ${{ env.MAIS_CDN_REPOSITORY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
 
       - name: Build and push sandbox executor (tagged release)
         if: startsWith(github.ref, 'refs/tags/')
@@ -96,6 +119,8 @@ jobs:
             ${{ env.IMAGE_NAME }}-executor:latest
             ${{ env.KOYEB_IMAGE }}-executor:${{ github.ref_name }}
             ${{ env.KOYEB_IMAGE }}-executor:latest
+            ${{ env.MAIS_CDN_REPOSITORY }}/${{ env.IMAGE_NAME }}-executor:${{ github.ref_name }}
+            ${{ env.MAIS_CDN_REPOSITORY }}/${{ env.IMAGE_NAME }}-executor:latest
             ${{ env.IMAGE_NAME }}:slim
             ${{ env.IMAGE_NAME }}:${{ github.ref_name }}-slim
             ${{ env.KOYEB_IMAGE }}:slim
@@ -117,6 +142,8 @@ jobs:
             ${{ env.IMAGE_NAME }}-executor:sha-${{ github.sha }}
             ${{ env.KOYEB_IMAGE }}-executor:main
             ${{ env.KOYEB_IMAGE }}-executor:sha-${{ github.sha }}
+            ${{ env.MAIS_CDN_REPOSITORY }}/${{ env.IMAGE_NAME }}-executor:main
+            ${{ env.MAIS_CDN_REPOSITORY }}/${{ env.IMAGE_NAME }}-executor:sha-${{ github.sha }}
             ${{ env.IMAGE_NAME }}:slim
             ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}-slim
             ${{ env.KOYEB_IMAGE }}:slim
@@ -170,47 +197,3 @@ jobs:
           prerelease: true
           tag_name: "commit-${{ github.sha }}"
           name: "Pre-release for commit ${{ github.sha }}"
-
-  # Copies the images pushed above to the MAIS CDN (cdn-images.mistralai.com is a CNAME of
-  # mistralaishared.azurecr.io), under docker/3rdparty/<image>: the path the MAIS mirror uses for docker.io/<image>.
-  mais-cdn:
-    needs: release
-    runs-on: ubuntu-latest
-    # The Azure federated credential trusts repo:koyeb/sandbox-container:environment:production,
-    # one subject for both main and tag builds.
-    environment: production
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      IMAGE_NAME: ${{ secrets.DOCKERHUB_REPOSITORY || format('{0}/sandbox', secrets.DOCKER_USERNAME) }}
-      MAIS_CDN_REPOSITORY: mistralaishared.azurecr.io/docker/3rdparty
-      VERSION_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('sha-{0}', github.sha) }}
-      MOVING_TAG: ${{ startsWith(github.ref, 'refs/tags/') && 'latest' || 'main' }}
-    steps:
-      - name: Set up crane
-        uses: imjasonh/setup-crane@v0.4
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Login to Azure
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Login to MAIS CDN registry
-        run: az acr login --name mistralaishared
-
-      # koyeb/sandbox is what the MAIS cloud-runtime-dataplane chart runs for the executor DaemonSet.
-      - name: Copy sandbox and sandbox executor images to MAIS CDN
-        run: |
-          for image in "${IMAGE_NAME}" "${IMAGE_NAME}-executor"; do
-            crane copy "${image}:${VERSION_TAG}" "${MAIS_CDN_REPOSITORY}/${image}:${VERSION_TAG}"
-            crane tag "${MAIS_CDN_REPOSITORY}/${image}:${VERSION_TAG}" "${MOVING_TAG}"
-          done
