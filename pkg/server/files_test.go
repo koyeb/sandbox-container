@@ -558,7 +558,12 @@ func TestFilesPutBadChecksumLength(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "f")
 	req := newAuthRequest(http.MethodPut, filesURL("/files", path), []byte("x"))
 	req.Header.Set("X-Content-SHA256", "deadbeef")
-	expectError(t, serve(mux, req), http.StatusBadRequest)
+	w := serve(mux, req)
+	body := w.Body.String()
+	expectError(t, w, http.StatusBadRequest)
+	if !strings.Contains(body, "64 hex") {
+		t.Errorf("expected the length rejection, got %q", body)
+	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Error("the file was written despite the bad checksum")
 	}
@@ -826,5 +831,21 @@ func TestSweepOrphanedTemps(t *testing.T) {
 	}
 	if _, err := os.Stat(bareTemp); !errors.Is(err, os.ErrNotExist) {
 		t.Error("a bare-marker temp survived the sweep")
+	}
+}
+
+// A hash is the file's content, and a special file has none to give: the
+// request is refused, never followed into a blocking read.
+func TestFilesStatHashSpecial(t *testing.T) {
+	_, mux := newTestServer(t)
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files/stat", fifo, "hash", "sha256"), nil))
+	body := w.Body.String()
+	expectError(t, w, http.StatusBadRequest)
+	if !strings.Contains(body, "not a regular file") {
+		t.Errorf("expected the not-a-regular-file rejection, got %q", body)
 	}
 }

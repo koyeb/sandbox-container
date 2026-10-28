@@ -161,6 +161,18 @@ func openRegular(path string) (*os.File, fs.FileInfo, error) {
 	return f, info, nil
 }
 
+// writeOpenError answers a failed open of a file route's target: a special
+// file is the path's own doing (400); the rest is the filesystem's word.
+func writeOpenError(w http.ResponseWriter, path string, err error) {
+	var nre notRegularError
+	if errors.As(err, &nre) {
+		writeFileError(w, http.StatusBadRequest, nre.Error())
+		return
+	}
+	slog.Debug("Failed to open file", "path", path, "error", err)
+	writeFSError(w, err)
+}
+
 func (s *Server) getFileHandler(w http.ResponseWriter, r *http.Request) {
 	path, ok := pathParam(w, r)
 	if !ok {
@@ -169,13 +181,7 @@ func (s *Server) getFileHandler(w http.ResponseWriter, r *http.Request) {
 
 	f, info, err := openRegular(path)
 	if err != nil {
-		var nre notRegularError
-		if errors.As(err, &nre) {
-			writeFileError(w, http.StatusBadRequest, nre.Error())
-		} else {
-			slog.Debug("Failed to open file", "path", path, "error", err)
-			writeFSError(w, err)
-		}
+		writeOpenError(w, path, err)
 		return
 	}
 	defer f.Close()
@@ -466,13 +472,9 @@ func (s *Server) statFileHandler(w http.ResponseWriter, r *http.Request) {
 	entry := fileEntry("", info)
 
 	if hashName != "" {
-		if !info.Mode().IsRegular() {
-			writeFileError(w, http.StatusBadRequest, fmt.Sprintf("%s is not a regular file", path))
-			return
-		}
 		sum, err := sha256File(path)
 		if err != nil {
-			writeFSError(w, err)
+			writeOpenError(w, path, err)
 			return
 		}
 		entry.SHA256 = sum
@@ -482,8 +484,10 @@ func (s *Server) statFileHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(entry)
 }
 
+// sha256File hashes what a download of path would return: the checked open
+// refuses a special file swapped in after the stat, so the hash never blocks.
 func sha256File(path string) (string, error) {
-	f, err := os.Open(path)
+	f, _, err := openRegular(path)
 	if err != nil {
 		return "", err
 	}

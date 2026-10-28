@@ -350,7 +350,8 @@ is read once to compute its sha256 (regular files only).
 }
 ```
 
-- `type`: `file`, `dir`, `symlink` or `other`
+- `type`: `file`, `dir`, `symlink` or `other` — `symlink` only comes from `/files/list`, which does
+  not follow links; stat follows them
 - `mode`: the permission bits, in octal
 - `mtime`: the modification time, RFC 3339 in UTC with nanoseconds
 
