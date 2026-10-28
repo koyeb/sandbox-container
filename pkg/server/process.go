@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -111,12 +110,7 @@ func (pm *ProcessManager) StartProcess(command, cwd string, env map[string]strin
 		cmd.Dir = cwd
 	}
 
-	if len(env) > 0 {
-		cmd.Env = os.Environ()
-		for key, value := range env {
-			cmd.Env = append(cmd.Env, key+"="+value)
-		}
-	}
+	cmd.Env = commandEnv(env)
 
 	process := &Process{
 		ID:        id,
@@ -203,6 +197,12 @@ func (pm *ProcessManager) captureOutput(process *Process, pipe io.Reader, stream
 			}
 		}
 		process.logsMu.RUnlock()
+	}
+
+	// A line over the buffer limit ends the scan silently otherwise: that
+	// stream's logs would just stop with no trace.
+	if err := scanner.Err(); err != nil {
+		slog.Debug("Process log capture stopped", "id", process.ID, "stream", stream, "error", err)
 	}
 }
 
@@ -303,7 +303,7 @@ func (pm *ProcessManager) GetProcessLogs(id string) ([]LogEntry, error) {
 	allLogs = append(allLogs, stdoutLogs...)
 	allLogs = append(allLogs, stderrLogs...)
 
-	// Sort by timestamp
+	// Each stream stays in order; the two streams are not interleaved by time.
 	return allLogs, nil
 }
 
@@ -339,11 +339,11 @@ func (pm *ProcessManager) StreamProcessLogs(id string) (<-chan LogEntry, error) 
 }
 
 // ToJSON returns a JSON-serializable representation of the process
-func (p *Process) ToJSON() map[string]interface{} {
+func (p *Process) ToJSON() map[string]any {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	result := map[string]interface{}{
+	result := map[string]any{
 		"id":         p.ID,
 		"pid":        p.PID,
 		"status":     p.Status,
@@ -367,11 +367,11 @@ func (p *Process) ToJSON() map[string]interface{} {
 }
 
 // ToSummaryJSON returns a minimal JSON representation for list views
-func (p *Process) ToSummaryJSON() map[string]interface{} {
+func (p *Process) ToSummaryJSON() map[string]any {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	return map[string]interface{}{
+	return map[string]any{
 		"id":      p.ID,
 		"pid":     p.PID,
 		"status":  p.Status,

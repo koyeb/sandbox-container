@@ -75,6 +75,14 @@ func main() {
 	}
 	mux := srv.RegisterRoutes()
 
+	// Remove PUT temp files a previous run crashed without cleaning up.
+	// The sweep logs and skips what it cannot remove, so it cannot fail.
+	if wd, err := os.Getwd(); err != nil {
+		slog.Warn("Failed to determine the working directory", "error", err)
+	} else {
+		server.SweepOrphanedTemps(wd)
+	}
+
 	// Start the main HTTP server
 	httpServer := &http.Server{
 		Addr:    ":" + config.Port,

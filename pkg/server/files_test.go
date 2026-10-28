@@ -68,8 +68,8 @@ func TestFilesBinaryRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "all-bytes.bin")
 
 	content := make([]byte, 0, 256*4)
-	for i := 0; i < 4; i++ {
-		for b := 0; b < 256; b++ {
+	for range 4 {
+		for b := range 256 {
 			content = append(content, byte(b))
 		}
 	}
@@ -305,14 +305,18 @@ func TestFilesStat(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 	var entry FileEntry
-	json.NewDecoder(w.Body).Decode(&entry)
+	if err := json.NewDecoder(w.Body).Decode(&entry); err != nil {
+		t.Fatal(err)
+	}
 	sum := sha256.Sum256([]byte("hello"))
 	if entry.Type != "file" || entry.Size != 5 || entry.Mode != "0640" || entry.MTime == "" || entry.SHA256 != hex.EncodeToString(sum[:]) {
 		t.Errorf("unexpected stat: %+v", entry)
 	}
 
 	w = serve(mux, newAuthRequest(http.MethodGet, filesURL("/files/stat", dir), nil))
-	json.NewDecoder(w.Body).Decode(&entry)
+	if err := json.NewDecoder(w.Body).Decode(&entry); err != nil {
+		t.Fatal(err)
+	}
 	if w.Code != http.StatusOK || entry.Type != "dir" {
 		t.Errorf("stat of a directory: %d %+v", w.Code, entry)
 	}
@@ -328,6 +332,9 @@ func readNDJSON(t *testing.T, body io.Reader) map[string]FileEntry {
 			t.Fatalf("bad NDJSON line %q: %v", sc.Text(), err)
 		}
 		entries[e.Path] = e
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("reading the listing stopped early: %v", err)
 	}
 	return entries
 }
@@ -399,6 +406,8 @@ func TestFilesErrors(t *testing.T) {
 		{"stat bad hash", get("/files/stat", file, "hash", "md5"), http.StatusBadRequest},
 		{"PUT bad mode", putFile(t, mux, file, []byte("x"), "mode", "rwx"), http.StatusBadRequest},
 		{"PUT mode out of range", putFile(t, mux, file, []byte("x"), "mode", "4755"), http.StatusBadRequest},
+		{"PUT bad parents", putFile(t, mux, file, []byte("x"), "parents", "yes"), http.StatusBadRequest},
+		{"list bad recursive", get("/files/list", dir, "recursive", "true"), http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { expectError(t, c.w, c.status) })
@@ -638,5 +647,184 @@ func TestFilesStatSpecial(t *testing.T) {
 	}
 	if entry.Type != "other" {
 		t.Errorf("stat FIFO type %q, expected other", entry.Type)
+	}
+}
+
+// fsErrorStatus is the wire contract the SDKs code against: pin every
+// row, including the two that had no test until now (403, 500).
+func TestFilesErrorStatusMap(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"missing", fs.ErrNotExist, http.StatusNotFound},
+		{"permission denied", fs.ErrPermission, http.StatusForbidden},
+		{"destination is a directory", errDestIsDir, http.StatusConflict},
+		{"already exists", fs.ErrExist, http.StatusConflict},
+		{"parent is a file", syscall.ENOTDIR, http.StatusConflict},
+		{"read of a directory", syscall.EISDIR, http.StatusConflict},
+		{"directory not empty", syscall.ENOTEMPTY, http.StatusConflict},
+		{"symlink chain too long", syscall.ELOOP, http.StatusConflict},
+		{"disk full", syscall.ENOSPC, http.StatusInternalServerError},
+		{"anything else", errors.New("unexpected"), http.StatusInternalServerError},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := fsErrorStatus(c.err); got != c.want {
+				t.Fatalf("fsErrorStatus(%v) = %d, want %d", c.err, got, c.want)
+			}
+		})
+	}
+}
+
+// A file the executor cannot read answers with the documented 403.
+func TestFilesGetForbidden(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses permission bits; no 403 to observe")
+	}
+	_, mux := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "locked")
+	os.WriteFile(path, []byte("x"), 0o644)
+	t.Cleanup(func() { os.Chmod(path, 0o644) })
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	expectError(t, serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", path), nil)), http.StatusForbidden)
+}
+
+// A current If-None-Match saves the transfer: 304, no body.
+func TestFilesGetNotModified(t *testing.T) {
+	_, mux := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "f")
+	os.WriteFile(path, []byte("hello"), 0o644)
+
+	head := serve(mux, newAuthRequest(http.MethodHead, filesURL("/files", path), nil))
+	etag := head.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("HEAD returned no ETag")
+	}
+
+	req := newAuthRequest(http.MethodGet, filesURL("/files", path), nil)
+	req.Header.Set("If-None-Match", etag)
+	if w := serve(mux, req); w.Code != http.StatusNotModified {
+		t.Fatalf("If-None-Match current: %d", w.Code)
+	} else if w.Body.Len() != 0 {
+		t.Errorf("304 carried a body: %q", w.Body.String())
+	}
+
+	req = newAuthRequest(http.MethodGet, filesURL("/files", path), nil)
+	req.Header.Set("If-None-Match", `"stale"`)
+	if w := serve(mux, req); w.Code != http.StatusOK || w.Body.String() != "hello" {
+		t.Fatalf("If-None-Match stale: %d %q", w.Code, w.Body.String())
+	}
+}
+
+// A PUT without mode= creates the file with the documented default, 0644.
+func TestFilesPutDefaultMode(t *testing.T) {
+	_, mux := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "f")
+	if w := putFile(t, mux, path, []byte("x")); w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Errorf("default mode %o, expected 0644", fi.Mode().Perm())
+	}
+}
+
+// GET and stat follow symlinks: this is what a download would return.
+func TestFilesGetThroughSymlink(t *testing.T) {
+	_, mux := newTestServer(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	link := filepath.Join(dir, "link")
+	os.WriteFile(target, []byte("hello"), 0o644)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	w := serve(mux, newAuthRequest(http.MethodGet, filesURL("/files", link), nil))
+	if w.Code != http.StatusOK || w.Body.String() != "hello" {
+		t.Fatalf("GET through a symlink: %d %q", w.Code, w.Body.String())
+	}
+
+	var entry FileEntry
+	w = serve(mux, newAuthRequest(http.MethodGet, filesURL("/files/stat", link), nil))
+	if err := json.NewDecoder(w.Body).Decode(&entry); err != nil {
+		t.Fatalf("bad stat body %q: %v", w.Body.String(), err)
+	}
+	if w.Code != http.StatusOK || entry.Type != "file" || entry.Size != 5 {
+		t.Errorf("stat through a symlink: %d %+v", w.Code, entry)
+	}
+}
+
+// A PUT into a directory the executor cannot write answers 403 as well.
+func TestFilesPutForbidden(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses permission bits; no 403 to observe")
+	}
+	_, mux := newTestServer(t)
+	dir := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	expectError(t, putFile(t, mux, filepath.Join(dir, "f"), []byte("x")), http.StatusForbidden)
+}
+
+// A crashed PUT leaves its temp next to the destination; the next run sweeps
+// it from the working directory down — and only it.
+func TestSweepOrphanedTemps(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "sub"), 0o755)
+	orphan := filepath.Join(dir, "sub", ".data.bin.koyeb-tmp-1290")
+	os.WriteFile(orphan, []byte("x"), 0o644)
+	linked := filepath.Join(dir, ".through-a-link.koyeb-tmp-1")
+	if err := os.Symlink(filepath.Join(dir, "sub"), linked); err != nil {
+		t.Fatal(err)
+	}
+	// A temp with no destination name still has the documented shape.
+	bareTemp := filepath.Join(dir, ".koyeb-tmp-7")
+	if err := os.WriteFile(bareTemp, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(dir, "data.bin")
+	os.WriteFile(keep, []byte("x"), 0o644)
+	// User files that merely mention the marker: the tail os.CreateTemp
+	// leaves is always digits, so neither is a temp.
+	lookalike := filepath.Join(dir, ".draft.koyeb-tmp-old")
+	if err := os.WriteFile(lookalike, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bareTail := filepath.Join(dir, ".bare.koyeb-tmp-")
+	if err := os.WriteFile(bareTail, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	SweepOrphanedTemps(dir)
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Error("the orphaned temp file survived the sweep")
+	}
+	if _, err := os.Lstat(linked); err != nil {
+		t.Errorf("the sweep followed or removed a symlink: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Error("the sweep removed a real file")
+	}
+	if _, err := os.Stat(lookalike); err != nil {
+		t.Error("the sweep removed a lookalike user file")
+	}
+	if _, err := os.Stat(bareTail); err != nil {
+		t.Error("the sweep removed an empty-tailed user file")
+	}
+	if _, err := os.Stat(bareTemp); !errors.Is(err, os.ErrNotExist) {
+		t.Error("a bare-marker temp survived the sweep")
 	}
 }
