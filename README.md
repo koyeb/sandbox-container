@@ -13,6 +13,7 @@ A secure sandbox container environment for executing commands and managing files
 - **Background Process Management**: Start, monitor, and control long-running background processes with real-time log streaming
 - **File Operations**: 
   - Stream raw bytes to and from files (`/files`): binary-safe, any size, Range requests, atomic writes
+  - Move whole directory trees as a gzip'd tar (`/files/archive`): streamed in both directions; member names and link targets must stay relative to the tree
   - Stat files and list directory trees
   - Write files
   - Read files
@@ -147,6 +148,8 @@ GET  /files?path=/tmp/data.bin                              # download (HEAD: he
 PUT  /files?path=/tmp/out/data.bin&parents=1&mode=0644      # upload, body = the bytes
 GET  /files/stat?path=/tmp/data.bin[&hash=sha256]
 GET  /files/list?path=/tmp[&recursive=1]                    # NDJSON, one entry per line
+GET  /files/archive?path=/tmp[&exclude=glob...]            # download the tree as a gzip'd tar
+PUT  /files/archive?path=/tmp                               # extract a gzip'd tar into the dir
 Authorization: Bearer <SANDBOX_SECRET>
 ```
 
@@ -154,6 +157,9 @@ Authorization: Bearer <SANDBOX_SECRET>
 - `PUT` writes to a temp file next to the destination, then renames it: a failed upload leaves the destination
   as it was. An optional `X-Content-SHA256` header is checked before the rename. It returns
   `{"size": ..., "sha256": "..."}`.
+- `/files/archive` moves whole trees as a gzip'd tar: `GET` streams one (with `tar --exclude`-style `exclude`
+  patterns), `PUT` extracts it and answers `{"files": ..., "bytes": ...}`, refusing absolute paths, `..` and
+  links that leave the directory.
 
 ```bash
 curl -T data.bin -H "Authorization: Bearer $SANDBOX_SECRET" "http://localhost:3030/files?path=/tmp/data.bin"

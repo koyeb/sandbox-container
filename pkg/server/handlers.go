@@ -168,14 +168,6 @@ type ReadFileResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
-type DeleteFileRequest struct {
-	Path string `json:"path"`
-}
-
-type DeleteDirRequest struct {
-	Path string `json:"path"`
-}
-
 type MakeDirRequest struct {
 	Path string `json:"path"`
 }
@@ -483,20 +475,9 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = cmd.Wait()
+	err = waitStreamingCommand(cmd, req.Cmd)
 	stdout.flush()
 	stderr.flush()
-	if errors.Is(err, exec.ErrWaitDelay) {
-		// The command exited, but a background child still held stdout or stderr
-		// WaitDelay after it: kill what is left of the process group. Commands that
-		// start services must redirect their output or use /start_process.
-		slog.Info("Killing background processes still holding the output of a streaming command", "cmd", req.Cmd, "wait_delay", streamingCommandWaitDelay)
-		if killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
-			slog.Debug("Failed to kill streaming command process group after wait delay", "cmd", req.Cmd, "error", killErr)
-		}
-		// The command itself succeeded: report it like any other exit code 0.
-		err = nil
-	}
 	exitCode := 0
 	if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
@@ -510,6 +491,21 @@ func (s *Server) runStreamingHandler(w http.ResponseWriter, r *http.Request) {
 		"error": err != nil,
 	})
 	writer.writeEvent("complete", string(completeData))
+}
+
+// waitStreamingCommand waits for a streaming command, absorbing the
+// wait-delay case: the command itself exited 0, a background child still
+// held the output, and the leftover process group has been killed.
+func waitStreamingCommand(cmd *exec.Cmd, name string) error {
+	err := cmd.Wait()
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		return err
+	}
+	slog.Info("Killing background processes still holding the output of a streaming command", "cmd", name, "wait_delay", streamingCommandWaitDelay)
+	if killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+		slog.Debug("Failed to kill streaming command process group after wait delay", "cmd", name, "error", killErr)
+	}
+	return nil
 }
 
 func emitStreamingOutput(writer *sseWriter, cmd, stream, line string) {
@@ -623,22 +619,30 @@ func (s *Server) unbindPortHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) deleteDirHandler(w http.ResponseWriter, r *http.Request) {
-	var req DeleteDirRequest
+// handleRemove carries the JSON remove routes' shared shape: decode the
+// path, run the removal, answer with the result envelope.
+func handleRemove(w http.ResponseWriter, r *http.Request, op func(string) error) {
+	var req struct {
+		Path string `json:"path"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
-	slog.Debug("Deleting directory", "path", req.Path)
+	slog.Debug("Removing", "path", req.Path)
 
-	err := os.RemoveAll(req.Path)
+	err := op(req.Path)
 	if err != nil {
-		slog.Debug("Failed to delete directory", "path", req.Path, "error", err)
+		slog.Debug("Failed to remove", "path", req.Path, "error", err)
 	} else {
-		slog.Debug("Directory deleted successfully", "path", req.Path)
+		slog.Debug("Removed", "path", req.Path)
 	}
 	writeResult(w, err)
+}
+
+func (s *Server) deleteDirHandler(w http.ResponseWriter, r *http.Request) {
+	handleRemove(w, r, os.RemoveAll)
 }
 
 func (s *Server) makeDirHandler(w http.ResponseWriter, r *http.Request) {
@@ -724,19 +728,5 @@ func (s *Server) readFileHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteFileHandler(w http.ResponseWriter, r *http.Request) {
-	var req DeleteFileRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	slog.Debug("Deleting file", "path", req.Path)
-
-	err := os.Remove(req.Path)
-	if err != nil {
-		slog.Debug("Failed to delete file", "path", req.Path, "error", err)
-	} else {
-		slog.Debug("File deleted successfully", "path", req.Path)
-	}
-	writeResult(w, err)
+	handleRemove(w, r, os.Remove)
 }
