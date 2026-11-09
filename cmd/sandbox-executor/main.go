@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -75,6 +76,11 @@ func main() {
 	}
 	mux := srv.RegisterRoutes()
 
+	// Cutoff for the orphan sweep, captured before the server starts
+	// listening: no temp of the current run (e.g. an in-flight upload) is
+	// older than this.
+	sweepStarted := time.Now()
+
 	// Start the main HTTP server first so /health answers immediately.
 	httpServer := &http.Server{
 		Addr:    ":" + config.Port,
@@ -92,10 +98,15 @@ func main() {
 	// Remove PUT temp files a previous run crashed without cleaning up, in
 	// the background: the sweep walks the whole working directory and must
 	// not delay the server. It logs and skips what it cannot remove.
+	var sweepWG sync.WaitGroup
 	if wd, err := os.Getwd(); err != nil {
 		slog.Warn("Failed to determine the working directory", "error", err)
 	} else {
-		go server.SweepOrphanedTemps(wd)
+		sweepWG.Add(1)
+		go func() {
+			defer sweepWG.Done()
+			server.SweepOrphanedTemps(wd, sweepStarted)
+		}()
 	}
 
 	// Start the TCP proxy server on user port
@@ -151,6 +162,7 @@ func main() {
 			}
 		case exitCode := <-customerDone:
 			slog.Info("Customer command exited", "exit_code", exitCode)
+			sweepWG.Wait()
 			shutdownServers(httpServer, srv)
 			os.Exit(exitCode)
 		}
@@ -159,6 +171,7 @@ func main() {
 	}
 
 	slog.Info("Shutting down servers...")
+	sweepWG.Wait()
 	shutdownServers(httpServer, srv)
 }
 
