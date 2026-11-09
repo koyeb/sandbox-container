@@ -834,6 +834,25 @@ func TestSweepOrphanedTemps(t *testing.T) {
 	}
 }
 
+// A temp file created after the sweep started belongs to the current run
+// (e.g. an in-flight upload), not to a crashed previous one: it must survive.
+func TestSweepOrphanedTempsKeepsFreshTemps(t *testing.T) {
+	dir := t.TempDir()
+	fresh := filepath.Join(dir, ".data.bin.koyeb-tmp-42")
+	if err := os.WriteFile(fresh, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(fresh, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	SweepOrphanedTemps(dir)
+	if _, err := os.Stat(fresh); err != nil {
+		t.Error("the sweep removed a temp created after it started")
+	}
+}
+
 // A hash is the file's content, and a special file has none to give: the
 // request is refused, never followed into a blocking read.
 func TestFilesStatHashSpecial(t *testing.T) {

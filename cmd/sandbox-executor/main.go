@@ -75,15 +75,7 @@ func main() {
 	}
 	mux := srv.RegisterRoutes()
 
-	// Remove PUT temp files a previous run crashed without cleaning up.
-	// The sweep logs and skips what it cannot remove, so it cannot fail.
-	if wd, err := os.Getwd(); err != nil {
-		slog.Warn("Failed to determine the working directory", "error", err)
-	} else {
-		server.SweepOrphanedTemps(wd)
-	}
-
-	// Start the main HTTP server
+	// Start the main HTTP server first so /health answers immediately.
 	httpServer := &http.Server{
 		Addr:    ":" + config.Port,
 		Handler: mux,
@@ -96,6 +88,15 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+
+	// Remove PUT temp files a previous run crashed without cleaning up, in
+	// the background: the sweep walks the whole working directory and must
+	// not delay the server. It logs and skips what it cannot remove.
+	if wd, err := os.Getwd(); err != nil {
+		slog.Warn("Failed to determine the working directory", "error", err)
+	} else {
+		go server.SweepOrphanedTemps(wd)
+	}
 
 	// Start the TCP proxy server on user port
 	slog.Info("Starting TCP proxy", "port", config.ProxyPort)
