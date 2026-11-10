@@ -434,8 +434,11 @@ func isDigits(s string) bool {
 // without cleaning up: they sit next to their destination as
 // .<name>.koyeb-tmp-* and would linger as regular entries in listings. The
 // walk does not follow symlinks, and a file it cannot remove is logged and
-// skipped, so a locked orphan never blocks the startup.
-func SweepOrphanedTemps(root string) {
+// skipped, so a locked orphan never blocks the startup. Only files strictly
+// older than started are removed: the caller captures started before the
+// server starts listening, so a temp of the current run (e.g. an in-flight
+// upload) is never touched.
+func SweepOrphanedTemps(root string, started time.Time) {
 	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			slog.Debug("Temp sweep skipped a directory", "path", p, "error", err)
@@ -445,6 +448,9 @@ func SweepOrphanedTemps(root string) {
 			return nil
 		}
 		if !isTempName(d.Name()) {
+			return nil
+		}
+		if info, err := d.Info(); err != nil || !info.ModTime().Before(started) {
 			return nil
 		}
 		if err := os.Remove(p); err != nil {

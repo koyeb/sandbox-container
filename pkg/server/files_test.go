@@ -813,7 +813,9 @@ func TestSweepOrphanedTemps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	SweepOrphanedTemps(dir)
+	// The cutoff is after the files' creation so the test does not depend on
+	// filesystem mtime granularity.
+	SweepOrphanedTemps(dir, time.Now().Add(time.Second))
 	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
 		t.Error("the orphaned temp file survived the sweep")
 	}
@@ -831,6 +833,48 @@ func TestSweepOrphanedTemps(t *testing.T) {
 	}
 	if _, err := os.Stat(bareTemp); !errors.Is(err, os.ErrNotExist) {
 		t.Error("a bare-marker temp survived the sweep")
+	}
+}
+
+// A temp file not strictly older than the sweep cutoff belongs to the
+// current run (e.g. an in-flight upload), not to a crashed previous one:
+// it must survive, including the mtime == cutoff boundary.
+func TestSweepOrphanedTempsKeepsFreshTemps(t *testing.T) {
+	dir := t.TempDir()
+	started := time.Now()
+	fresh := filepath.Join(dir, ".data.bin.koyeb-tmp-42")
+	if err := os.WriteFile(fresh, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := started.Add(time.Hour)
+	if err := os.Chtimes(fresh, future, future); err != nil {
+		t.Fatal(err)
+	}
+	boundary := filepath.Join(dir, ".edge.bin.koyeb-tmp-7")
+	if err := os.WriteFile(boundary, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(boundary, started, started); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(dir, ".old.bin.koyeb-tmp-1")
+	if err := os.WriteFile(old, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	past := started.Add(-time.Hour)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	SweepOrphanedTemps(dir, started)
+	if _, err := os.Stat(fresh); err != nil {
+		t.Error("the sweep removed a temp newer than the cutoff")
+	}
+	if _, err := os.Stat(boundary); err != nil {
+		t.Error("the sweep removed a temp whose mtime equals the cutoff")
+	}
+	if _, err := os.Stat(old); !errors.Is(err, os.ErrNotExist) {
+		t.Error("a temp older than the cutoff survived the sweep")
 	}
 }
 
